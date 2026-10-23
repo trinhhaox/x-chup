@@ -18,6 +18,9 @@ spikes/**/out/
 *.png.tmp
 .qmlls.ini
 /Cargo.lock.bak
+dist/
+*.dmg
+
 packaging/aur/*/src/
 packaging/aur/*/pkg/
 packaging/aur/*/snip/
