@@ -52,7 +52,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fputs("Usage: snip-ui <tray | update | settings | overlay | card <image-path> | pin <image-path> | ocr <image-path>>\n", stderr)
     }
 
+    var singleInstanceLockFD: Int32 = -1
+
+    func acquireSingleInstanceLock() -> Bool {
+        let currentPID = ProcessInfo.processInfo.processIdentifier
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.trinhhaox.xchup"
+        let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+        if running.contains(where: { $0.processIdentifier != currentPID }) {
+            return false
+        }
+
+        let path = "/tmp/xchup_tray.lock"
+        singleInstanceLockFD = Darwin.open(path, O_CREAT | O_RDWR, 0o666)
+        if singleInstanceLockFD >= 0 {
+            var fl = flock(l_start: 0, l_len: 0, l_pid: 0, l_type: Int16(F_WRLCK), l_whence: Int16(SEEK_SET))
+            if fcntl(singleInstanceLockFD, F_SETLK, &fl) != 0 {
+                Darwin.close(singleInstanceLockFD)
+                return false
+            }
+        }
+        return true
+    }
+
     func runTray() {
+        guard acquireSingleInstanceLock() else {
+            fputs("xChup tray is already running.\n", stderr)
+            exit(0)
+        }
         NSApp.setActivationPolicy(.accessory)
         TrayController.shared.show()
     }

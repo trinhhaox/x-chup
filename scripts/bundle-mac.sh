@@ -143,6 +143,8 @@ swiftc -O -framework AppKit -framework Carbon -framework Vision -framework Image
 
 echo "==> 4. Assembling ${APP_DIR}..."
 # Stop running instances first
+PLIST_DIR="${HOME}/Library/LaunchAgents"
+launchctl unload "${PLIST_DIR}/com.trinhhaox.xchup.plist" 2>/dev/null || true
 killall xChup 2>/dev/null || true
 killall snip-ui 2>/dev/null || true
 killall snipd 2>/dev/null || true
@@ -242,9 +244,6 @@ cat << PLIST_AGENT_EOF > "${PLIST_DIR}/com.trinhhaox.xchup.plist"
 PLIST_AGENT_EOF
 
 launchctl load "${PLIST_DIR}/com.trinhhaox.xchup.plist" 2>/dev/null || true
-
-# Launch the app now
-open -a "${APP_DIR}"
 
 echo ""
 echo "=========================================================="
