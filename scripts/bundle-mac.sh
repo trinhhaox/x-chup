@@ -11,7 +11,7 @@ RESOURCES_DIR="${CONTENTS_DIR}/Resources"
 LOCAL_BIN="${HOME}/.local/bin"
 
 echo "==> 1. Building release binaries (cargo)..."
-cargo build --release
+cargo build --release -p snip-cli -p snip-daemon
 
 echo "==> 2. Generating AppIcon.icns..."
 mkdir -p /tmp/AppIcon.iconset
@@ -144,11 +144,12 @@ swiftc -O -framework AppKit -framework Carbon -framework Vision -framework Image
 echo "==> 4. Assembling ${APP_DIR}..."
 # Stop running instances first
 PLIST_DIR="${HOME}/Library/LaunchAgents"
+launchctl bootout "gui/$(id -u)/com.trinhhaox.xchup" 2>/dev/null || true
 launchctl unload "${PLIST_DIR}/com.trinhhaox.xchup.plist" 2>/dev/null || true
-killall xChup 2>/dev/null || true
-killall snip-ui 2>/dev/null || true
-killall snipd 2>/dev/null || true
-sleep 0.5
+pkill -9 -x xChup 2>/dev/null || true
+pkill -9 -x snipd 2>/dev/null || true
+pkill -9 -x snip-ui 2>/dev/null || true
+sleep 1
 
 rm -rf "${APP_DIR}"
 mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}"
@@ -175,9 +176,9 @@ cat << 'PLIST_EOF' > "${CONTENTS_DIR}/Info.plist"
     <key>CFBundleIdentifier</key>
     <string>com.trinhhaox.xchup</string>
     <key>CFBundleVersion</key>
-    <string>0.1.0</string>
+    <string>0.1.1</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>0.1.1</string>
     <key>CFBundleExecutable</key>
     <string>xChup</string>
     <key>CFBundleIconFile</key>
@@ -211,39 +212,23 @@ ln -sf "${MACOS_DIR}/snipd" "${LOCAL_BIN}/snipd"
 ln -sf "${MACOS_DIR}/xChup" "${LOCAL_BIN}/snip-ui"
 ln -sf "${MACOS_DIR}/xChup" "${LOCAL_BIN}/xchup"
 
-# Unload old bare launchagents if any
+# Remove any legacy launchctl agents
 PLIST_DIR="${HOME}/Library/LaunchAgents"
+launchctl bootout "gui/$(id -u)/com.trinhhaox.xchup" 2>/dev/null || true
 launchctl unload "${PLIST_DIR}/com.trinhhaox.xchup.plist" 2>/dev/null || true
-launchctl unload "${PLIST_DIR}/com.trinhhaox.xchup.daemon.plist" 2>/dev/null || true
-launchctl unload "${PLIST_DIR}/com.trinhhaox.xchup.tray.plist" 2>/dev/null || true
-rm -f "${PLIST_DIR}/com.trinhhaox.xchup.daemon.plist" "${PLIST_DIR}/com.trinhhaox.xchup.tray.plist"
+rm -f "${PLIST_DIR}/com.trinhhaox.xchup.plist" "${PLIST_DIR}/com.trinhhaox.xchup.daemon.plist" "${PLIST_DIR}/com.trinhhaox.xchup.tray.plist"
 
-# Create a clean single LaunchAgent that runs xChup.app at login
-cat << PLIST_AGENT_EOF > "${PLIST_DIR}/com.trinhhaox.xchup.plist"
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.trinhhaox.xchup</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>${MACOS_DIR}/xChup</string>
-        <string>tray</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/tmp/xchup.log</string>
-    <key>StandardErrorPath</key>
-    <string>/tmp/xchup.log</string>
-</dict>
-</plist>
-PLIST_AGENT_EOF
+# Register Login Item for xChup.app
+osascript -e '
+tell application "System Events"
+    if not (exists login item "xChup") then
+        make login item at end with properties {path:"/Applications/xChup.app", hidden:false, name:"xChup"}
+    end if
+end tell
+' 2>/dev/null || true
 
-launchctl load "${PLIST_DIR}/com.trinhhaox.xchup.plist" 2>/dev/null || true
+# Launch xChup as a standard user GUI application
+open -a "${APP_DIR}" --args tray
 
 echo ""
 echo "=========================================================="

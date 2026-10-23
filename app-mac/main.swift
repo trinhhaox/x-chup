@@ -3,13 +3,18 @@ import Foundation
 import Vision
 import ImageIO
 import Carbon
+import AVFoundation
+import UniformTypeIdentifiers
 
 // MARK: - Entry Point
+
+var isStandaloneMode = false
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let args = CommandLine.arguments
         if args.count < 2 {
+            isStandaloneMode = false
             runTray()
             return
         }
@@ -17,32 +22,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let cmd = args[1]
         switch cmd {
         case "tray", "app":
+            isStandaloneMode = false
             runTray()
         case "update":
+            isStandaloneMode = true
             runUpdate()
         case "settings", "shortcuts", "preferences":
+            isStandaloneMode = true
             runShortcuts()
         case "annotate", "edit":
+            isStandaloneMode = true
             guard args.count >= 3 else {
                 fputs("Error: annotate requires an image file path\n", stderr)
                 exit(1)
             }
             runAnnotate(imagePath: args[2])
+        case "color", "picker", "eyedropper":
+            isStandaloneMode = true
+            runColorPicker()
+        case "gif":
+            isStandaloneMode = true
+            guard args.count >= 3 else {
+                fputs("Error: gif requires a video file path (.mov)\n", stderr)
+                exit(1)
+            }
+            runGifExport(videoPath: args[2])
         case "overlay":
-            runOverlay()
+            isStandaloneMode = true
+            let outPath = args.count >= 3 ? args[2] : nil
+            runOverlay(outputPath: outPath)
+        case "fullscreen":
+            isStandaloneMode = true
+            guard args.count >= 3 else {
+                fputs("Error: fullscreen requires an image file path\n", stderr)
+                exit(1)
+            }
+            runFullscreen(outputPath: args[2])
         case "card":
+            isStandaloneMode = true
             guard args.count >= 3 else {
                 fputs("Error: card requires an image file path\n", stderr)
                 exit(1)
             }
             runCard(imagePath: args[2])
         case "pin":
+            isStandaloneMode = true
             guard args.count >= 3 else {
                 fputs("Error: pin requires an image file path\n", stderr)
                 exit(1)
             }
             runPin(imagePath: args[2])
         case "ocr":
+            isStandaloneMode = true
             guard args.count >= 3 else {
                 fputs("Error: ocr requires an image file path\n", stderr)
                 exit(1)
@@ -55,7 +86,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func printUsage() {
-        fputs("Usage: snip-ui <tray | update | settings | annotate <image-path> | overlay | card <image-path> | pin <image-path> | ocr <image-path>>\n", stderr)
+        fputs("Usage: snip-ui <tray | update | settings | annotate <image> | color | gif <video> | overlay | card <image> | pin <image> | ocr <image>>\n", stderr)
     }
 
     var singleInstanceLockFD: Int32 = -1
@@ -80,12 +111,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    func checkScreenCapturePermission(prompt: Bool = false) -> Bool {
+        if #available(macOS 10.15, *) {
+            if CGPreflightScreenCaptureAccess() {
+                return true
+            }
+            if prompt {
+                CGRequestScreenCaptureAccess()
+                DispatchQueue.main.async {
+                    let alert = NSAlert()
+                    alert.messageText = "Cần cấp quyền Ghi lại màn hình cho xChup"
+                    alert.informativeText = "Để chụp ảnh màn hình, bạn cần bật quyền 'Ghi màn hình & Âm thanh hệ thống' cho xChup trong Cài đặt hệ thống.\n\nSau khi bật xong, vui lòng khởi động lại xChup để áp dụng."
+                    alert.alertStyle = .warning
+                    alert.addButton(withTitle: "Mở Cài đặt hệ thống")
+                    alert.addButton(withTitle: "Để sau")
+                    if alert.runModal() == .alertFirstButtonReturn {
+                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                }
+            }
+            return false
+        }
+        return true
+    }
+
     func runTray() {
         guard acquireSingleInstanceLock() else {
             fputs("xChup tray is already running.\n", stderr)
             exit(0)
         }
         NSApp.setActivationPolicy(.accessory)
+        _ = checkScreenCapturePermission(prompt: true)
         TrayController.shared.show()
     }
 
@@ -99,14 +157,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AnnotationWindowController.shared.show(imagePath: imagePath)
     }
 
+    func runColorPicker() {
+        NSApp.setActivationPolicy(.accessory)
+        ColorPickerWindowController.shared.show()
+    }
+
+    func runGifExport(videoPath: String) {
+        NSApp.setActivationPolicy(.accessory)
+        GifConverter.convert(movUrl: URL(fileURLWithPath: videoPath)) { res in
+            switch res {
+            case .success(let gifUrl):
+                print("GIF exported successfully: \(gifUrl.path)")
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.writeObjects([gifUrl as NSURL])
+                exit(0)
+            case .failure(let err):
+                fputs("Failed to export GIF: \(err.localizedDescription)\n", stderr)
+                exit(1)
+            }
+        }
+    }
+
     func runUpdate() {
         NSApp.setActivationPolicy(.accessory)
         UpdateManager.shared.checkForUpdates(silent: false)
     }
 
-    func runOverlay() {
+    func runOverlay(outputPath: String? = nil) {
         NSApp.setActivationPolicy(.accessory)
-        OverlayController.shared.show()
+        OverlayController.shared.show(outputPath: outputPath)
+    }
+
+    func runFullscreen(outputPath: String) {
+        NSApp.setActivationPolicy(.accessory)
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        task.arguments = ["-x", outputPath]
+        try? task.run()
+        task.waitUntilExit()
+        if task.terminationStatus != 0 {
+            fputs("screencapture fullscreen failed with status \(task.terminationStatus)\n", stderr)
+            exit(1)
+        }
+        exit(0)
     }
 
     func runCard(imagePath: String) {
@@ -131,13 +225,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 // MARK: - Selection Overlay
 
+final class OverlayWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+}
+
 final class OverlayController {
     static let shared = OverlayController()
     private var windows: [NSWindow] = []
+    private var outputPath: String?
+    private var completion: ((String, NSRect) -> Void)?
 
-    func show() {
+    func show(outputPath: String? = nil, completion: ((String, NSRect) -> Void)? = nil) {
+        self.outputPath = outputPath
+        self.completion = completion
+        NSApp.activate(ignoringOtherApps: true)
+
         windows = NSScreen.screens.map { screen in
-            let window = NSWindow(
+            let window = OverlayWindow(
                 contentRect: screen.frame,
                 styleMask: [.borderless],
                 backing: .buffered,
@@ -154,6 +259,7 @@ final class OverlayController {
             let overlayView = OverlayView(frame: NSRect(origin: .zero, size: screen.frame.size), screenFrame: screen.frame)
             window.contentView = overlayView
             window.makeKeyAndOrderFront(nil)
+            window.orderFrontRegardless()
             return window
         }
     }
@@ -164,21 +270,60 @@ final class OverlayController {
         }
         windows.removeAll()
 
-        if let r = rect, r.width > 2 && r.height > 2 {
-            let json: [String: Any] = [
-                "x": Int(r.origin.x),
-                "y": Int(r.origin.y),
-                "w": Int(r.width),
-                "h": Int(r.height)
-            ]
-            if let data = try? JSONSerialization.data(withJSONObject: json),
-               let str = String(data: data, encoding: .utf8) {
-                print(str)
+        // Đợi 60ms để WindowServer dọn sạch frame overlay khỏi màn hình
+        usleep(60_000)
+
+        guard let r = rect, r.width > 2 && r.height > 2 else {
+            if completion != nil {
+                // In-app mode: user cancelled, don't exit app
+                self.completion = nil
+                return
+            } else {
+                fputs("Cancelled\n", stderr)
+                if isStandaloneMode {
+                    exit(1)
+                }
+                return
             }
+        }
+
+        // Chụp màn hình bằng screencapture từ ngữ cảnh của ứng dụng macOS
+        if let outPath = outputPath {
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+            let rArg = "-R\(Int(r.origin.x)),\(Int(r.origin.y)),\(Int(r.width)),\(Int(r.height))"
+            task.arguments = ["-x", rArg, outPath]
+            try? task.run()
+            task.waitUntilExit()
+
+            if task.terminationStatus != 0 {
+                fputs("screencapture failed with status \(task.terminationStatus)\n", stderr)
+                showNotification(title: "xChup Lỗi", text: "Không thể chụp màn hình. Vui lòng cấp quyền Ghi màn hình trong Cài đặt hệ thống.")
+                if completion == nil && isStandaloneMode {
+                    exit(1)
+                }
+                return
+            }
+        }
+
+        if let cb = completion, let outPath = outputPath {
+            self.completion = nil
+            cb(outPath, r)
+            return
+        }
+
+        let json: [String: Any] = [
+            "x": Int(r.origin.x),
+            "y": Int(r.origin.y),
+            "w": Int(r.width),
+            "h": Int(r.height)
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: json),
+           let str = String(data: data, encoding: .utf8) {
+            print(str)
+        }
+        if isStandaloneMode {
             exit(0)
-        } else {
-            fputs("Cancelled\n", stderr)
-            exit(1)
         }
     }
 }
@@ -199,6 +344,19 @@ final class OverlayView: NSView {
     }
 
     override var acceptsFirstResponder: Bool { true }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .crosshair)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for ta in trackingAreas {
+            removeTrackingArea(ta)
+        }
+        let area = NSTrackingArea(rect: bounds, options: [.activeAlways, .mouseMoved, .cursorUpdate], owner: self, userInfo: nil)
+        addTrackingArea(area)
+    }
 
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 { // ESC
@@ -230,9 +388,10 @@ final class OverlayView: NSView {
         let w = abs(current.x - start.x)
         let h = abs(current.y - start.y)
 
-        // Convert AppKit (bottom-left) to display coordinate (top-left)
-        let topY = screenFrame.height - (y + h)
-        let finalRect = NSRect(x: screenFrame.origin.x + x, y: screenFrame.origin.y + topY, width: w, height: h)
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? screenFrame.height
+        let quartzY = primaryHeight - (screenFrame.origin.y + y + h)
+        let quartzX = screenFrame.origin.x + x
+        let finalRect = NSRect(x: quartzX, y: quartzY, width: w, height: h)
 
         OverlayController.shared.finish(rect: finalRect)
     }
@@ -318,7 +477,10 @@ final class QuickAccessController: NSObject {
     func show(imagePath: String) {
         self.imagePath = imagePath
         guard let screen = NSScreen.main, let image = NSImage(contentsOfFile: imagePath) else {
-            exit(1)
+            if isStandaloneMode {
+                exit(1)
+            }
+            return
         }
 
         let maxCardW: CGFloat = 280
@@ -354,6 +516,7 @@ final class QuickAccessController: NSObject {
         let cardView = CardView(frame: NSRect(x: 0, y: 0, width: totalW, height: totalH), image: image, filePath: imagePath)
         win.contentView = cardView
         win.makeKeyAndOrderFront(nil)
+        win.orderFrontRegardless()
         self.window = win
 
         // Auto dismiss after 6 seconds
@@ -366,24 +529,32 @@ final class QuickAccessController: NSObject {
 
     func openAnnotation() {
         dismissWorkItem?.cancel()
+        dismissWorkItem = nil
         window?.orderOut(nil)
+        window = nil
         AnnotationWindowController.shared.show(imagePath: imagePath)
     }
 
     func openPin() {
         dismissWorkItem?.cancel()
+        dismissWorkItem = nil
         window?.orderOut(nil)
+        window = nil
         PinController.shared.show(imagePath: imagePath)
     }
 
     func dismiss() {
         dismissWorkItem?.cancel()
+        dismissWorkItem = nil
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.25
             self.window?.animator().alphaValue = 0.0
         }, completionHandler: {
             self.window?.orderOut(nil)
-            exit(0)
+            self.window = nil
+            if isStandaloneMode {
+                exit(0)
+            }
         })
     }
 }
@@ -479,7 +650,10 @@ final class PinController: NSObject {
 
     func show(imagePath: String) {
         guard let screen = NSScreen.main, let image = NSImage(contentsOfFile: imagePath) else {
-            exit(1)
+            if isStandaloneMode {
+                exit(1)
+            }
+            return
         }
 
         let initialW = min(image.size.width / 2, 600)
@@ -540,7 +714,9 @@ final class PinView: NSView {
     override func rightMouseDown(with event: NSEvent) {
         // Right click to close
         window?.orderOut(nil)
-        exit(0)
+        if isStandaloneMode {
+            exit(0)
+        }
     }
 }
 
@@ -1109,6 +1285,687 @@ final class AnnotationWindowController: NSWindowController {
     }
 }
 
+// MARK: - Color Eyedropper & Magnifier
+
+final class ColorPickerWindowController: NSObject {
+    static let shared = ColorPickerWindowController()
+    private var windows: [NSWindow] = []
+
+    enum ColorFormat: Int, CaseIterable {
+        case hex = 0
+        case rgb = 1
+        case nsColor = 2
+
+        var name: String {
+            switch self {
+            case .hex: return "HEX"
+            case .rgb: return "RGB"
+            case .nsColor: return "Swift"
+            }
+        }
+    }
+
+    var currentFormat: ColorFormat = .hex
+
+    static func captureScreenImage(screen: NSScreen) -> CGImage? {
+        let tempPath = "/tmp/xchup_colorpicker_\(ProcessInfo.processInfo.processIdentifier).png"
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        if let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID {
+            task.arguments = ["-x", "-D", "\(screenNumber)", tempPath]
+        } else {
+            task.arguments = ["-x", tempPath]
+        }
+        try? task.run()
+        task.waitUntilExit()
+
+        guard FileManager.default.fileExists(atPath: tempPath) else { return nil }
+        defer { try? FileManager.default.removeItem(atPath: tempPath) }
+
+        let url = URL(fileURLWithPath: tempPath)
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            return nil
+        }
+        return cgImage
+    }
+
+    func show() {
+        close()
+        currentFormat = .hex
+
+        for screen in NSScreen.screens {
+            let screenRect = screen.frame
+            guard let screenshot = ColorPickerWindowController.captureScreenImage(screen: screen) else {
+                continue
+            }
+
+            let win = NSWindow(
+                contentRect: screenRect,
+                styleMask: [.borderless],
+                backing: .buffered,
+                defer: false
+            )
+            win.level = .popUpMenu
+            win.isOpaque = false
+            win.backgroundColor = .clear
+            win.hasShadow = false
+            win.ignoresMouseEvents = false
+            win.acceptsMouseMovedEvents = true
+
+            let overlayView = MagnifierOverlayView(
+                frame: NSRect(origin: .zero, size: screenRect.size),
+                screen: screen,
+                screenshot: screenshot,
+                controller: self
+            )
+            win.contentView = overlayView
+            win.makeKeyAndOrderFront(nil)
+            windows.append(win)
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+        NSCursor.hide()
+    }
+
+    func close() {
+        NSCursor.unhide()
+        for win in windows {
+            win.orderOut(nil)
+        }
+        windows.removeAll()
+    }
+
+    func cycleFormat() {
+        let all = ColorFormat.allCases
+        let nextIndex = (currentFormat.rawValue + 1) % all.count
+        currentFormat = all[nextIndex]
+        for win in windows {
+            win.contentView?.needsDisplay = true
+        }
+    }
+
+    func copyColor(_ color: NSColor) {
+        close()
+
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        color.usingColorSpace(.sRGB)?.getRed(&r, green: &g, blue: &b, alpha: &a)
+
+        let rInt = Int(round(r * 255.0))
+        let gInt = Int(round(g * 255.0))
+        let bInt = Int(round(b * 255.0))
+
+        let hex = String(format: "#%02X%02X%02X", rInt, gInt, bInt)
+        let rgb = "rgb(\(rInt), \(gInt), \(bInt))"
+        let swift = String(format: "NSColor(red: %.2f, green: %.2f, blue: %.2f, alpha: 1.0)", r, g, b)
+
+        let resultString: String
+        switch currentFormat {
+        case .hex: resultString = hex
+        case .rgb: resultString = rgb
+        case .nsColor: resultString = swift
+        }
+
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(resultString, forType: .string)
+
+        NSSound(named: "Pop")?.play()
+        showNotification(
+            title: "xChup • Đã sao chép mã màu",
+            text: "\(resultString) (\(currentFormat.name)) đã được lưu vào Clipboard."
+        )
+    }
+}
+
+final class MagnifierOverlayView: NSView {
+    private let screenObj: NSScreen
+    private let screenshot: CGImage
+    private weak var controller: ColorPickerWindowController?
+    private var mousePoint: CGPoint?
+
+    init(frame: NSRect, screen: NSScreen, screenshot: CGImage, controller: ColorPickerWindowController) {
+        self.screenObj = screen
+        self.screenshot = screenshot
+        self.controller = controller
+        super.init(frame: frame)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 { // ESC
+            controller?.close()
+        } else if event.keyCode == 49 { // Space
+            controller?.cycleFormat()
+        } else if event.keyCode == 36 { // Enter
+            if let color = currentColorAtMouse() {
+                controller?.copyColor(color)
+            }
+        } else {
+            super.keyDown(with: event)
+        }
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        mousePoint = convert(event.locationInWindow, from: nil)
+        needsDisplay = true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if let color = currentColorAtMouse() {
+            controller?.copyColor(color)
+        }
+    }
+
+    private func currentColorAtMouse() -> NSColor? {
+        guard let pt = mousePoint else { return nil }
+        let scaleX = CGFloat(screenshot.width) / max(bounds.width, 1)
+        let scaleY = CGFloat(screenshot.height) / max(bounds.height, 1)
+        let px = Int(round(pt.x * scaleX))
+        let py = Int(round((bounds.height - pt.y) * scaleY))
+        return getPixelColor(cgImage: screenshot, x: px, y: py)
+    }
+
+    private func getPixelColor(cgImage: CGImage, x: Int, y: Int) -> NSColor? {
+        guard x >= 0, x < cgImage.width, y >= 0, y < cgImage.height else { return nil }
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        var rawData = [UInt8](repeating: 0, count: 4)
+        guard let context = CGContext(
+            data: &rawData,
+            width: 1,
+            height: 1,
+            bitsPerComponent: 8,
+            bytesPerRow: 4,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
+        ) else { return nil }
+
+        context.draw(cgImage, in: CGRect(x: -x, y: -(cgImage.height - 1 - y), width: cgImage.width, height: cgImage.height))
+        let r = CGFloat(rawData[0]) / 255.0
+        let g = CGFloat(rawData[1]) / 255.0
+        let b = CGFloat(rawData[2]) / 255.0
+        let a = CGFloat(rawData[3]) / 255.0
+        return NSColor(red: r, green: g, blue: b, alpha: a)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard let ctx = NSGraphicsContext.current?.cgContext, let pt = mousePoint else { return }
+
+        let scaleX = CGFloat(screenshot.width) / max(bounds.width, 1)
+        let scaleY = CGFloat(screenshot.height) / max(bounds.height, 1)
+        let px = Int(round(pt.x * scaleX))
+        let py = Int(round((bounds.height - pt.y) * scaleY))
+        guard let currentColor = getPixelColor(cgImage: screenshot, x: px, y: py) else { return }
+
+        let loupeRadius: CGFloat = 65
+        let loupeDiameter = loupeRadius * 2
+
+        var loupeOrigin = CGPoint(x: pt.x + 28, y: pt.y + 28)
+        if loupeOrigin.x + loupeDiameter + 20 > bounds.maxX {
+            loupeOrigin.x = pt.x - loupeDiameter - 28
+        }
+        if loupeOrigin.y + loupeDiameter + 65 > bounds.maxY {
+            loupeOrigin.y = pt.y - loupeDiameter - 28
+        }
+        if loupeOrigin.x < 10 { loupeOrigin.x = 10 }
+        if loupeOrigin.y < 10 { loupeOrigin.y = 10 }
+
+        let loupeRect = CGRect(origin: loupeOrigin, size: CGSize(width: loupeDiameter, height: loupeDiameter))
+
+        // 1. Draw outer shadow
+        ctx.saveGState()
+        ctx.setShadow(offset: CGSize(width: 0, height: -4), blur: 14, color: NSColor(calibratedWhite: 0, alpha: 0.45).cgColor)
+        ctx.setFillColor(NSColor.black.cgColor)
+        ctx.fillEllipse(in: loupeRect)
+        ctx.restoreGState()
+
+        // 2. Crop screenshot pixels (13x13 grid)
+        let gridSize = 13
+        let halfGrid = gridSize / 2
+        let cropRect = CGRect(x: px - halfGrid, y: py - halfGrid, width: gridSize, height: gridSize)
+
+        if let cropCG = screenshot.cropping(to: cropRect) {
+            ctx.saveGState()
+            ctx.addEllipse(in: loupeRect)
+            ctx.clip()
+
+            ctx.interpolationQuality = .none
+            ctx.draw(cropCG, in: loupeRect)
+
+            // Draw pixel grid
+            let cellSize = loupeDiameter / CGFloat(gridSize)
+            ctx.setStrokeColor(NSColor(calibratedWhite: 0.5, alpha: 0.28).cgColor)
+            ctx.setLineWidth(0.6)
+
+            for i in 1..<gridSize {
+                let xPos = loupeRect.minX + CGFloat(i) * cellSize
+                ctx.move(to: CGPoint(x: xPos, y: loupeRect.minY))
+                ctx.addLine(to: CGPoint(x: xPos, y: loupeRect.maxY))
+
+                let yPos = loupeRect.minY + CGFloat(i) * cellSize
+                ctx.move(to: CGPoint(x: loupeRect.minX, y: yPos))
+                ctx.addLine(to: CGPoint(x: loupeRect.maxX, y: yPos))
+            }
+            ctx.strokePath()
+
+            // Highlight center crosshair cell
+            let centerCellRect = CGRect(
+                x: loupeRect.minX + CGFloat(halfGrid) * cellSize,
+                y: loupeRect.minY + CGFloat(halfGrid) * cellSize,
+                width: cellSize,
+                height: cellSize
+            )
+            ctx.setStrokeColor(NSColor.white.cgColor)
+            ctx.setLineWidth(1.8)
+            ctx.stroke(centerCellRect.insetBy(dx: 0.5, dy: 0.5))
+
+            ctx.setStrokeColor(NSColor.black.cgColor)
+            ctx.setLineWidth(0.8)
+            ctx.stroke(centerCellRect.insetBy(dx: 1.5, dy: 1.5))
+
+            ctx.restoreGState()
+        }
+
+        // 3. Draw outer glass rim
+        ctx.saveGState()
+        ctx.setStrokeColor(NSColor.white.cgColor)
+        ctx.setLineWidth(3.5)
+        ctx.strokeEllipse(in: loupeRect)
+
+        ctx.setStrokeColor(NSColor(calibratedWhite: 0.2, alpha: 0.6).cgColor)
+        ctx.setLineWidth(1.0)
+        ctx.strokeEllipse(in: loupeRect.insetBy(dx: -1.5, dy: -1.5))
+        ctx.restoreGState()
+
+        // 4. Draw HUD Info Badge below / above loupe
+        let badgeW: CGFloat = 165
+        let badgeH: CGFloat = 48
+        var badgeX = loupeRect.midX - badgeW / 2
+        var badgeY = loupeRect.minY - badgeH - 10
+
+        if badgeY < 10 {
+            badgeY = loupeRect.maxY + 10
+        }
+        if badgeX < 10 { badgeX = 10 }
+        if badgeX + badgeW > bounds.maxX - 10 { badgeX = bounds.maxX - badgeW - 10 }
+
+        let badgeRect = CGRect(x: badgeX, y: badgeY, width: badgeW, height: badgeH)
+        let badgePath = NSBezierPath(roundedRect: badgeRect, xRadius: 10, yRadius: 10)
+
+        ctx.saveGState()
+        ctx.setShadow(offset: CGSize(width: 0, height: -2), blur: 8, color: NSColor(calibratedWhite: 0, alpha: 0.4).cgColor)
+        NSColor(calibratedWhite: 0.12, alpha: 0.92).setFill()
+        badgePath.fill()
+        ctx.restoreGState()
+
+        NSColor(calibratedWhite: 0.35, alpha: 0.6).setStroke()
+        badgePath.lineWidth = 1.0
+        badgePath.stroke()
+
+        // Color preview square in badge
+        let chipRect = CGRect(x: badgeRect.minX + 10, y: badgeRect.minY + badgeH - 24, width: 15, height: 15)
+        let chipPath = NSBezierPath(roundedRect: chipRect, xRadius: 3.5, yRadius: 3.5)
+        currentColor.setFill()
+        chipPath.fill()
+        NSColor.white.withAlphaComponent(0.8).setStroke()
+        chipPath.lineWidth = 1.0
+        chipPath.stroke()
+
+        // Format strings
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        currentColor.usingColorSpace(.sRGB)?.getRed(&r, green: &g, blue: &b, alpha: &a)
+        let rInt = Int(round(r * 255.0))
+        let gInt = Int(round(g * 255.0))
+        let bInt = Int(round(b * 255.0))
+
+        let hex = String(format: "#%02X%02X%02X", rInt, gInt, bInt)
+        let rgb = "rgb(\(rInt), \(gInt), \(bInt))"
+        let swift = String(format: "NSColor(%.2f, %.2f, %.2f)", r, g, b)
+
+        let fmt = controller?.currentFormat ?? .hex
+        let displayText: String
+        switch fmt {
+        case .hex: displayText = "\(hex) [HEX]"
+        case .rgb: displayText = "\(rgb) [RGB]"
+        case .nsColor: displayText = "\(swift)"
+        }
+
+        let codeAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .bold),
+            .foregroundColor: NSColor.white
+        ]
+        (displayText as NSString).draw(at: CGPoint(x: badgeRect.minX + 32, y: badgeRect.minY + badgeH - 24), withAttributes: codeAttrs)
+
+        let hintAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 9.5),
+            .foregroundColor: NSColor(calibratedWhite: 0.70, alpha: 1.0)
+        ]
+        let hint = "Click: Copy • Space: Kiểu • Esc: Huỷ"
+        (hint as NSString).draw(at: CGPoint(x: badgeRect.minX + 10, y: badgeRect.minY + 8), withAttributes: hintAttrs)
+    }
+}
+
+// MARK: - Screen Video & GIF Exporter
+
+final class GifConverter {
+    static func findFFmpeg() -> String? {
+        let candidates = [
+            "/opt/homebrew/bin/ffmpeg",
+            "/usr/local/bin/ffmpeg",
+            "/usr/bin/ffmpeg"
+        ]
+        for p in candidates {
+            if FileManager.default.fileExists(atPath: p) {
+                return p
+            }
+        }
+        return nil
+    }
+
+    static func convert(movUrl: URL, completion: @escaping (Result<URL, Error>) -> Void) {
+        let outUrl = movUrl.deletingPathExtension().appendingPathExtension("gif")
+
+        if let ffmpeg = findFFmpeg() {
+            DispatchQueue.global(qos: .userInitiated).async {
+                let task = Process()
+                task.executableURL = URL(fileURLWithPath: ffmpeg)
+                task.arguments = [
+                    "-y",
+                    "-i", movUrl.path,
+                    "-vf", "fps=15,scale=flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=128:stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=3",
+                    outUrl.path
+                ]
+                do {
+                    try task.run()
+                    task.waitUntilExit()
+                    if task.terminationStatus == 0 && FileManager.default.fileExists(atPath: outUrl.path) {
+                        DispatchQueue.main.async {
+                            completion(.success(outUrl))
+                        }
+                    } else {
+                        convertNative(movUrl: movUrl, outUrl: outUrl, completion: completion)
+                    }
+                } catch {
+                    convertNative(movUrl: movUrl, outUrl: outUrl, completion: completion)
+                }
+            }
+        } else {
+            convertNative(movUrl: movUrl, outUrl: outUrl, completion: completion)
+        }
+    }
+
+    static func convertNative(movUrl: URL, outUrl: URL, completion: @escaping (Result<URL, Error>) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let asset = AVURLAsset(url: movUrl)
+            let duration = CMTimeGetSeconds(asset.duration)
+            guard duration > 0 && !duration.isNaN else {
+                DispatchQueue.main.async {
+                    completion(.failure(NSError(domain: "xChup", code: -1, userInfo: [NSLocalizedDescriptionKey: "Video duration is invalid"])))
+                }
+                return
+            }
+
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.appliesPreferredTrackTransform = true
+            generator.maximumSize = CGSize(width: 800, height: 800)
+
+            let fps: Double = 12.0
+            let frameCount = min(Int(duration * fps), 180)
+            guard frameCount > 0 else { return }
+
+            guard let destination = CGImageDestinationCreateWithURL(outUrl as CFURL, UTType.gif.identifier as CFString, frameCount, nil) else {
+                DispatchQueue.main.async {
+                    completion(.failure(NSError(domain: "xChup", code: -2, userInfo: [NSLocalizedDescriptionKey: "Failed to initialize GIF destination"])))
+                }
+                return
+            }
+
+            let frameDelay = 1.0 / fps
+            let frameProps = [
+                kCGImagePropertyGIFDictionary: [
+                    kCGImagePropertyGIFDelayTime: frameDelay,
+                    kCGImagePropertyGIFUnclampedDelayTime: frameDelay
+                ]
+            ] as CFDictionary
+
+            let gifProps = [
+                kCGImagePropertyGIFDictionary: [
+                    kCGImagePropertyGIFLoopCount: 0
+                ]
+            ] as CFDictionary
+            CGImageDestinationSetProperties(destination, gifProps)
+
+            for i in 0..<frameCount {
+                let time = CMTime(seconds: Double(i) * frameDelay, preferredTimescale: 600)
+                if let cgImage = try? generator.copyCGImage(at: time, actualTime: nil) {
+                    CGImageDestinationAddImage(destination, cgImage, frameProps)
+                }
+            }
+
+            if CGImageDestinationFinalize(destination) && FileManager.default.fileExists(atPath: outUrl.path) {
+                DispatchQueue.main.async {
+                    completion(.success(outUrl))
+                }
+            } else {
+                DispatchQueue.main.async {
+                    completion(.failure(NSError(domain: "xChup", code: -3, userInfo: [NSLocalizedDescriptionKey: "Failed to write GIF file"])))
+                }
+            }
+        }
+    }
+}
+
+final class VideoCompletedController: NSObject {
+    static let shared = VideoCompletedController()
+    private var window: NSWindow?
+    private var videoPath: String = ""
+    private var dismissWorkItem: DispatchWorkItem?
+
+    func show(videoPath: String) {
+        self.videoPath = videoPath
+        guard let screen = NSScreen.main, FileManager.default.fileExists(atPath: videoPath) else { return }
+
+        let cardW: CGFloat = 310
+        let cardH: CGFloat = 115
+        let margin: CGFloat = 20
+        let originX = screen.visibleFrame.maxX - cardW - margin
+        let originY = screen.visibleFrame.minY + margin
+
+        let win = NSWindow(
+            contentRect: NSRect(x: originX, y: originY, width: cardW, height: cardH),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        win.isOpaque = false
+        win.backgroundColor = .clear
+        win.level = .floating
+        win.hasShadow = true
+
+        let cardView = VideoCardView(frame: NSRect(x: 0, y: 0, width: cardW, height: cardH), videoPath: videoPath)
+        win.contentView = cardView
+        win.makeKeyAndOrderFront(nil)
+        self.window = win
+
+        let work = DispatchWorkItem { [weak self] in
+            self?.close()
+        }
+        dismissWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10.0, execute: work)
+    }
+
+    func cancelAutoDismiss() {
+        dismissWorkItem?.cancel()
+        dismissWorkItem = nil
+    }
+
+    func close() {
+        window?.orderOut(nil)
+        window = nil
+    }
+}
+
+final class VideoCardView: NSView, NSDraggingSource {
+    private let videoPath: String
+    private var gifButton: NSButton!
+    private var playButton: NSButton!
+    private var folderButton: NSButton!
+    private var closeButton: NSButton!
+    private var thumbnailImage: NSImage?
+    private var generatedGifUrl: URL?
+
+    init(frame: NSRect, videoPath: String) {
+        self.videoPath = videoPath
+        super.init(frame: frame)
+
+        // Generate thumbnail
+        let asset = AVURLAsset(url: URL(fileURLWithPath: videoPath))
+        let gen = AVAssetImageGenerator(asset: asset)
+        gen.appliesPreferredTrackTransform = true
+        if let cg = try? gen.copyCGImage(at: CMTime(seconds: 0.1, preferredTimescale: 600), actualTime: nil) {
+            self.thumbnailImage = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+        }
+
+        // Close button (X)
+        closeButton = NSButton(title: "✕", target: self, action: #selector(actionClose))
+        closeButton.isBordered = false
+        closeButton.font = NSFont.systemFont(ofSize: 11, weight: .bold)
+        closeButton.contentTintColor = NSColor(calibratedWhite: 0.6, alpha: 1.0)
+        closeButton.frame = NSRect(x: bounds.width - 24, y: bounds.height - 24, width: 18, height: 18)
+        addSubview(closeButton)
+
+        // GIF button
+        gifButton = NSButton(title: "🎞 Xuất GIF", target: self, action: #selector(actionExportGif))
+        gifButton.bezelStyle = .rounded
+        gifButton.font = NSFont.systemFont(ofSize: 11, weight: .bold)
+        gifButton.frame = NSRect(x: 104, y: 12, width: 90, height: 26)
+        addSubview(gifButton)
+
+        // Play button
+        playButton = NSButton(title: "▶️ Xem", target: self, action: #selector(actionPlayVideo))
+        playButton.bezelStyle = .rounded
+        playButton.font = NSFont.systemFont(ofSize: 11)
+        playButton.frame = NSRect(x: 198, y: 12, width: 50, height: 26)
+        addSubview(playButton)
+
+        // Folder button
+        folderButton = NSButton(title: "📁", target: self, action: #selector(actionOpenFolder))
+        folderButton.bezelStyle = .rounded
+        folderButton.font = NSFont.systemFont(ofSize: 11)
+        folderButton.frame = NSRect(x: 252, y: 12, width: 44, height: 26)
+        addSubview(folderButton)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    @objc private func actionClose() {
+        VideoCompletedController.shared.close()
+    }
+
+    @objc private func actionPlayVideo() {
+        NSWorkspace.shared.open(URL(fileURLWithPath: videoPath))
+    }
+
+    @objc private func actionOpenFolder() {
+        let capturesDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/share/snip/captures")
+        NSWorkspace.shared.open(capturesDir)
+    }
+
+    @objc private func actionExportGif() {
+        VideoCompletedController.shared.cancelAutoDismiss()
+        gifButton.isEnabled = false
+        gifButton.title = "⏳ Đang xuất..."
+
+        GifConverter.convert(movUrl: URL(fileURLWithPath: videoPath)) { [weak self] res in
+            guard let self = self else { return }
+            self.gifButton.isEnabled = true
+            switch res {
+            case .success(let gifUrl):
+                self.generatedGifUrl = gifUrl
+                self.gifButton.title = "✓ Đã copy GIF"
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.writeObjects([gifUrl as NSURL])
+
+                NSSound(named: "Glass")?.play()
+                showNotification(
+                    title: "xChup • Đã xuất ảnh GIF",
+                    text: "File GIF đã được lưu và sao chép vào Clipboard. Bạn có thể dán (⌘V) ngay."
+                )
+            case .failure(let err):
+                self.gifButton.title = "Lỗi xuất GIF"
+                showNotification(
+                    title: "xChup • Lỗi xuất GIF",
+                    text: err.localizedDescription
+                )
+            }
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+
+        // Glass background card
+        let bgPath = NSBezierPath(roundedRect: bounds.insetBy(dx: 4, dy: 4), xRadius: 14, yRadius: 14)
+        NSColor(calibratedWhite: 0.14, alpha: 0.94).setFill()
+        bgPath.fill()
+        NSColor(calibratedWhite: 0.35, alpha: 0.50).setStroke()
+        bgPath.lineWidth = 1.0
+        bgPath.stroke()
+
+        // Draw video thumbnail box
+        let thumbRect = NSRect(x: 14, y: 16, width: 80, height: 75)
+        let thumbPath = NSBezierPath(roundedRect: thumbRect, xRadius: 8, yRadius: 8)
+
+        if let thumb = thumbnailImage {
+            thumbPath.addClip()
+            thumb.draw(in: thumbRect, from: .zero, operation: .sourceOver, fraction: 1.0)
+        } else {
+            NSColor(calibratedWhite: 0.22, alpha: 1.0).setFill()
+            thumbPath.fill()
+            let icon = "🎥"
+            let iconAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 26)]
+            (icon as NSString).draw(at: NSPoint(x: thumbRect.midX - 14, y: thumbRect.midY - 16), withAttributes: iconAttrs)
+        }
+
+        // Draw title
+        let titleAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 13, weight: .bold),
+            .foregroundColor: NSColor.white
+        ]
+        ("🎥 Đã quay xong video" as NSString).draw(at: NSPoint(x: 104, y: 72), withAttributes: titleAttrs)
+
+        // Draw subtitle
+        let fileName = URL(fileURLWithPath: videoPath).lastPathComponent
+        let subAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 10.5),
+            .foregroundColor: NSColor(calibratedWhite: 0.70, alpha: 1.0)
+        ]
+        (fileName as NSString).draw(at: NSPoint(x: 104, y: 52), withAttributes: subAttrs)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let fileToDrag = generatedGifUrl?.path ?? videoPath
+        let pasteboardItem = NSPasteboardItem()
+        pasteboardItem.setString(URL(fileURLWithPath: fileToDrag).absoluteString, forType: .fileURL)
+
+        let draggingItem = NSDraggingItem(pasteboardWriter: pasteboardItem)
+        let dragBounds = NSRect(x: 14, y: 16, width: 80, height: 75)
+        draggingItem.setDraggingFrame(dragBounds, contents: thumbnailImage ?? NSImage())
+
+        beginDraggingSession(with: [draggingItem], event: event, source: self)
+    }
+
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        return .copy
+    }
+}
+
 // MARK: - OCR & QR Code Detection
 
 final class OCRController {
@@ -1283,15 +2140,41 @@ struct ShortcutSettings: Codable {
     var ocr: ShortcutItem
     var pin: ShortcutItem
     var record: ShortcutItem
+    var color: ShortcutItem
+
+    enum CodingKeys: String, CodingKey {
+        case area, fullscreen, ocr, pin, record, color
+    }
+
+    init(area: ShortcutItem, fullscreen: ShortcutItem, ocr: ShortcutItem, pin: ShortcutItem, record: ShortcutItem, color: ShortcutItem) {
+        self.area = area
+        self.fullscreen = fullscreen
+        self.ocr = ocr
+        self.pin = pin
+        self.record = record
+        self.color = color
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.area = try container.decode(ShortcutItem.self, forKey: .area)
+        self.fullscreen = try container.decode(ShortcutItem.self, forKey: .fullscreen)
+        self.ocr = try container.decode(ShortcutItem.self, forKey: .ocr)
+        self.pin = try container.decode(ShortcutItem.self, forKey: .pin)
+        self.record = try container.decode(ShortcutItem.self, forKey: .record)
+        self.color = try container.decodeIfPresent(ShortcutItem.self, forKey: .color) ?? ShortcutItem(keyCode: UInt16(kVK_ANSI_C), modifiers: UInt32(controlKey | shiftKey))
+    }
 
     static var defaultSettings: ShortcutSettings {
         let cmdShift = UInt32(cmdKey | shiftKey)
+        let ctrlShift = UInt32(controlKey | shiftKey)
         return ShortcutSettings(
             area: ShortcutItem(keyCode: UInt16(kVK_ANSI_4), modifiers: cmdShift),
             fullscreen: ShortcutItem(keyCode: UInt16(kVK_ANSI_3), modifiers: cmdShift),
             ocr: ShortcutItem(keyCode: UInt16(kVK_ANSI_6), modifiers: cmdShift),
             pin: ShortcutItem(keyCode: UInt16(kVK_ANSI_5), modifiers: cmdShift),
-            record: ShortcutItem(keyCode: UInt16(kVK_ANSI_7), modifiers: cmdShift)
+            record: ShortcutItem(keyCode: UInt16(kVK_ANSI_7), modifiers: cmdShift),
+            color: ShortcutItem(keyCode: UInt16(kVK_ANSI_C), modifiers: ctrlShift)
         )
     }
 
@@ -1414,14 +2297,15 @@ final class ShortcutPreferencesWindowController: NSWindowController {
     private var ocrButton: KeyRecorderButton!
     private var pinButton: KeyRecorderButton!
     private var recordButton: KeyRecorderButton!
+    private var colorButton: KeyRecorderButton!
 
     private var buttons: [KeyRecorderButton] {
-        return [areaButton, fullButton, ocrButton, pinButton, recordButton].compactMap { $0 }
+        return [areaButton, fullButton, ocrButton, pinButton, recordButton, colorButton].compactMap { $0 }
     }
 
     init() {
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 490, height: 440),
+            contentRect: NSRect(x: 0, y: 0, width: 490, height: 490),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -1511,11 +2395,17 @@ final class ShortcutPreferencesWindowController: NSWindowController {
             self?.updateShortcut(\.record, to: item)
         }
 
+        colorButton = KeyRecorderButton(shortcut: settings.color)
+        colorButton.onShortcutChanged = { [weak self] item in
+            self?.updateShortcut(\.color, to: item)
+        }
+
         stack.addArrangedSubview(makeRow(title: "Chụp vùng (Area)", subtitle: "Kéo chuột chọn vùng cần chụp", button: areaButton))
         stack.addArrangedSubview(makeRow(title: "Chụp toàn màn hình (Fullscreen)", subtitle: "Chụp tức thì toàn bộ màn hình", button: fullButton))
         stack.addArrangedSubview(makeRow(title: "Nhận diện chữ & QR (OCR)", subtitle: "Trích xuất văn bản vào clipboard", button: ocrButton))
         stack.addArrangedSubview(makeRow(title: "Ghim ảnh nổi (Pin Image)", subtitle: "Ghim ảnh chụp nổi trên màn hình", button: pinButton))
         stack.addArrangedSubview(makeRow(title: "Quay màn hình (Record)", subtitle: "Bật / Dừng quay video màn hình", button: recordButton))
+        stack.addArrangedSubview(makeRow(title: "Chấm màu màn hình (Color Eyedropper)", subtitle: "Kính lúp phóng to pixel & sao chép mã màu", button: colorButton))
 
         let resetBtn = NSButton(title: "↺ Đặt lại mặc định", target: self, action: #selector(actionReset))
         resetBtn.bezelStyle = .rounded
@@ -1600,7 +2490,8 @@ final class ShortcutPreferencesWindowController: NSWindowController {
             ("Chụp toàn màn hình", settings.fullscreen),
             ("Nhận diện chữ & QR", settings.ocr),
             ("Ghim ảnh nổi", settings.pin),
-            ("Quay màn hình", settings.record)
+            ("Quay màn hình", settings.record),
+            ("Chấm màu màn hình", settings.color)
         ]
 
         for (name, existing) in all {
@@ -1631,6 +2522,7 @@ final class ShortcutPreferencesWindowController: NSWindowController {
         ocrButton?.shortcut = settings.ocr
         pinButton?.shortcut = settings.pin
         recordButton?.shortcut = settings.record
+        colorButton?.shortcut = settings.color
     }
 
     @objc private func actionReset() {
@@ -1658,6 +2550,7 @@ final class HotKeyManager {
         case ocr = 3
         case pin = 4
         case record = 5
+        case color = 6
     }
 
     var onHotKey: ((Action) -> Void)?
@@ -1709,6 +2602,7 @@ final class HotKeyManager {
         registerItem(settings.ocr, id: .ocr)
         registerItem(settings.pin, id: .pin)
         registerItem(settings.record, id: .record)
+        registerItem(settings.color, id: .color)
 
         // Đăng ký bổ sung Control+Shift nếu dùng mặc định Command+Shift
         let cmdShift = UInt32(cmdKey | shiftKey)
@@ -1783,6 +2677,8 @@ func createMenuBarIcon() -> NSImage {
     return img
 }
 
+var daemonProcess: Process?
+
 func ensureDaemonRunning() {
     let task = Process()
     task.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
@@ -1801,7 +2697,11 @@ func ensureDaemonRunning() {
         if let bin = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: bin)
+            proc.environment = ProcessInfo.processInfo.environment
+            proc.standardOutput = FileHandle.nullDevice
+            proc.standardError = FileHandle.nullDevice
             try? proc.run()
+            daemonProcess = proc
         }
     }
 }
@@ -2043,6 +2943,7 @@ final class TrayController: NSObject, NSMenuDelegate {
     private let recentMenu = NSMenu()
     private var isRecording = false
     private var recordProcess: Process?
+    private var currentRecordingPath: String?
 
     func show() {
         ensureDaemonRunning()
@@ -2112,6 +3013,11 @@ final class TrayController: NSObject, NSMenuDelegate {
         ocrItem.target = self
         menu.addItem(ocrItem)
 
+        let colorItem = NSMenuItem(title: "🔍 Chấm màu màn hình (Color Eyedropper)", action: #selector(actionColorPicker), keyEquivalent: keyEquivalentString(settings.color))
+        colorItem.keyEquivalentModifierMask = nsModifierFlags(from: settings.color.modifiers)
+        colorItem.target = self
+        menu.addItem(colorItem)
+
         let pinItem = NSMenuItem(title: "Ghim ảnh nổi (Pin Image)", action: #selector(actionPin), keyEquivalent: keyEquivalentString(settings.pin))
         pinItem.keyEquivalentModifierMask = nsModifierFlags(from: settings.pin.modifiers)
         pinItem.target = self
@@ -2131,6 +3037,10 @@ final class TrayController: NSObject, NSMenuDelegate {
         let annotateRecentItem = NSMenuItem(title: "✏️ Chú thích ảnh gần đây (Annotate)...", action: #selector(actionAnnotateRecent), keyEquivalent: "")
         annotateRecentItem.target = self
         menu.addItem(annotateRecentItem)
+
+        let gifRecentItem = NSMenuItem(title: "🎞 Chuyển video gần đây thành GIF...", action: #selector(actionConvertRecentVideoToGif), keyEquivalent: "")
+        gifRecentItem.target = self
+        menu.addItem(gifRecentItem)
 
         let recentItem = NSMenuItem(title: "Ảnh gần đây (Recent)", action: nil, keyEquivalent: "")
         recentItem.submenu = recentMenu
@@ -2246,16 +3156,85 @@ final class TrayController: NSObject, NSMenuDelegate {
         }
     }
 
+    private func copyImageToClipboard(filePath: String) {
+        let url = URL(fileURLWithPath: filePath)
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        if let img = NSImage(contentsOf: url) {
+            pb.writeObjects([img, url as NSURL])
+        }
+        if let data = try? Data(contentsOf: url) {
+            pb.setData(data, forType: NSPasteboard.PasteboardType("public.png"))
+        }
+    }
+
     @objc func actionArea() {
-        runSnipCommand(["area"])
+        if let del = NSApp.delegate as? AppDelegate, !del.checkScreenCapturePermission(prompt: true) {
+            return
+        }
+        let saveDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Pictures/Screenshots")
+        try? FileManager.default.createDirectory(at: saveDir, withIntermediateDirectories: true)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+        let filename = "Capture-\(formatter.string(from: Date())).png"
+        let filePath = saveDir.appendingPathComponent(filename).path
+
+        // Chờ 150ms để NSMenu đóng mượt mà trước khi mở Overlay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            OverlayController.shared.show(outputPath: filePath) { path, rect in
+                self?.copyImageToClipboard(filePath: path)
+                DispatchQueue.main.async {
+                    QuickAccessController.shared.show(imagePath: path)
+                }
+            }
+        }
     }
 
     @objc func actionFullscreen() {
-        runSnipCommand(["fullscreen"])
+        if let del = NSApp.delegate as? AppDelegate, !del.checkScreenCapturePermission(prompt: true) {
+            return
+        }
+        let saveDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Pictures/Screenshots")
+        try? FileManager.default.createDirectory(at: saveDir, withIntermediateDirectories: true)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+        let filename = "Capture-\(formatter.string(from: Date())).png"
+        let filePath = saveDir.appendingPathComponent(filename).path
+
+        // Chờ 150ms để NSMenu đóng mượt mà trước khi chụp toàn màn hình
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+            task.arguments = ["-x", filePath]
+            try? task.run()
+            task.waitUntilExit()
+
+            if task.terminationStatus == 0 {
+                self?.copyImageToClipboard(filePath: filePath)
+                DispatchQueue.main.async {
+                    QuickAccessController.shared.show(imagePath: filePath)
+                }
+            } else {
+                showNotification(title: "xChup Lỗi", text: "Không thể chụp màn hình. Vui lòng kiểm tra quyền Ghi màn hình.")
+            }
+        }
     }
 
     @objc func actionOCR() {
-        runSnipCommand(["text"])
+        if let del = NSApp.delegate as? AppDelegate, !del.checkScreenCapturePermission(prompt: true) {
+            return
+        }
+        let tempPath = "/tmp/xchup_ocr_\(ProcessInfo.processInfo.processIdentifier).png"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            OverlayController.shared.show(outputPath: tempPath) { path, rect in
+                let text = OCRController.shared.recognize(imagePath: path)
+                let pb = NSPasteboard.general
+                pb.clearContents()
+                pb.setString(text, forType: .string)
+                showNotification(title: "xChup OCR", text: text.isEmpty ? "Không tìm thấy văn bản" : "Đã sao chép: \(text.prefix(60))...")
+                try? FileManager.default.removeItem(atPath: path)
+            }
+        }
     }
 
     @objc func actionPin() {
@@ -2303,6 +3282,7 @@ final class TrayController: NSObject, NSMenuDelegate {
         let outputPath = capturesDir.appendingPathComponent("snip_rec_\(timestamp).mov").path
 
         isRecording = true
+        currentRecordingPath = outputPath
         updateButtonIcon()
         buildMenu()
 
@@ -2320,16 +3300,50 @@ final class TrayController: NSObject, NSMenuDelegate {
 
     private func stopRecording() {
         guard isRecording, let proc = recordProcess else { return }
+        let videoPath = currentRecordingPath
         proc.interrupt()
         recordProcess = nil
         isRecording = false
+        currentRecordingPath = nil
         updateButtonIcon()
         buildMenu()
 
-        showNotification(
-            title: "xChup - Đã dừng quay màn hình",
-            text: "Video đã được lưu vào thư mục captures."
-        )
+        if let path = videoPath, FileManager.default.fileExists(atPath: path) {
+            VideoCompletedController.shared.show(videoPath: path)
+        } else {
+            showNotification(
+                title: "xChup - Đã dừng quay màn hình",
+                text: "Video đã được lưu vào thư mục captures."
+            )
+        }
+    }
+
+    @objc func actionColorPicker() {
+        ColorPickerWindowController.shared.show()
+    }
+
+    @objc func actionConvertRecentVideoToGif() {
+        let capturesDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/share/snip/captures")
+        let fileManager = FileManager.default
+        guard let files = try? fileManager.contentsOfDirectory(at: capturesDir, includingPropertiesForKeys: [.contentModificationDateKey], options: .skipsHiddenFiles) else {
+            showNotification(title: "xChup", text: "Chưa có video nào trong thư mục lưu trữ.")
+            return
+        }
+
+        let videoFiles = files.filter { ["mov", "mp4", "m4v"].contains($0.pathExtension.lowercased()) }
+        let sorted = videoFiles.sorted {
+            let d1 = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date.distantPast
+            let d2 = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date.distantPast
+            return d1 > d2
+        }
+
+        guard let latest = sorted.first else {
+            showNotification(title: "xChup", text: "Chưa có video nào gần đây để chuyển sang GIF.")
+            return
+        }
+
+        VideoCompletedController.shared.show(videoPath: latest.path)
     }
 
     @objc func actionAnnotateRecent() {
@@ -2388,12 +3402,17 @@ final class TrayController: NSObject, NSMenuDelegate {
         • \(settings.area.displayString): Chụp vùng màn hình (Area Capture)
         • \(settings.fullscreen.displayString): Chụp toàn màn hình (Fullscreen)
         • \(settings.ocr.displayString): Nhận diện chữ & mã QR (OCR Text)
+        • \(settings.color.displayString): Chấm màu màn hình (Color Eyedropper)
         • \(settings.pin.displayString): Ghim ảnh nổi lên màn hình (Pin Image)
         • \(settings.record.displayString): Bật / Dừng quay màn hình (Screen Record)
 
+        Công cụ hỗ trợ Designer & Developer:
+        • Kính lúp lấy mã màu (Eyedropper): Phóng to từng pixel, hiển thị tâm ngắm chính xác. Bấm Space để đổi định dạng (HEX / RGB / NSColor), Click để sao chép vào Clipboard.
+        • Xuất video sang GIF: Sau khi dừng quay màn hình, Quick Card sẽ hiển thị nút '🎞 Xuất GIF' để chuyển video sang ảnh GIF sắc nét, tối ưu dung lượng dán vào GitHub/Slack.
+
         Bộ công cụ chú thích ảnh tức thì (Instant Annotation):
-        • Quick Card sau khi chụp: Bấm '✏️ Sửa' hoặc nhấp đúp ảnh thumbnail để mở Editor.
-        • Công cụ vẽ: Mũi tên chỉ dẫn (Arrow), Khung chữ nhật (Box), Làm mờ che thông tin nhạy cảm (Blur Pixelate), Đánh số thứ tự tự tăng ① ② ③ (Step Counter), Bút vẽ tự do (Pen) & Chữ (Text).
+        • Quick Card sau khi chụp: Bấm '✏️ Sửa' hoặc nhấp đúp thumbnail để mở Editor.
+        • Công cụ vẽ: Mũi tên (Arrow), Khung (Box), Làm mờ bảo mật (Blur Pixelate), Đánh số thứ tự tự tăng ① ② ③ (Step Counter), Bút vẽ tự do (Pen) & Chữ (Text).
         • Phím tắt Editor: ⌘Z (Undo), ⇧⌘Z (Redo), ⌘C (Sao chép), ⌘S (Lưu đè).
 
         Tính năng nâng cao:
@@ -2429,6 +3448,8 @@ final class TrayController: NSObject, NSMenuDelegate {
             actionPin()
         case .record:
             actionToggleRecord()
+        case .color:
+            actionColorPicker()
         }
     }
 }

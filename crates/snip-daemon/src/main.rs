@@ -11,7 +11,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
-use snip_core::encode::crop_and_encode;
 use snip_core::geometry::Rect;
 use snip_core::history::{History, Record};
 use snip_core::paths;
@@ -40,6 +39,16 @@ fn find_ui_bin() -> PathBuf {
         return local_ui;
     }
     PathBuf::from("target/debug/snip-ui")
+}
+
+fn get_png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() >= 24 && &bytes[0..8] == b"\x89PNG\r\n\x1a\n" && &bytes[12..16] == b"IHDR" {
+        let width = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+        let height = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+        Some((width, height))
+    } else {
+        None
+    }
 }
 
 struct RecordingState {
@@ -92,73 +101,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                let displays = snip_darwin::get_displays();
-                let main_display = match displays.first() {
-                    Some(d) => d,
-                    None => return Response::err("no active displays found"),
-                };
-
-                let frame = match snip_darwin::capture_display(main_display.id) {
-                    Ok(f) => f,
-                    Err(e) => return Response::err(format!("capture failed: {e}")),
-                };
-
-                // Determine crop rectangle (interactive overlay or explicit rect)
-                let crop_rect = match rect {
-                    Some([x, y, w, h]) => Rect::new(x, y, w, h),
-                    None if mode == "area" || mode.starts_with("text") => {
-                        let ui_bin = find_ui_bin();
-                        let output = Command::new(ui_bin).arg("overlay").output();
-                        match output {
-                            Ok(out) if out.status.success() => {
-                                let out_str = String::from_utf8_lossy(&out.stdout);
-                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out_str) {
-                                    let x = v["x"].as_i64().unwrap_or(0) as i32;
-                                    let y = v["y"].as_i64().unwrap_or(0) as i32;
-                                    let w = v["w"].as_i64().unwrap_or(100) as i32;
-                                    let h = v["h"].as_i64().unwrap_or(100) as i32;
-                                    let scale = frame.scale;
-                                    Rect::new(
-                                        (x as f64 * scale) as i32,
-                                        (y as f64 * scale) as i32,
-                                        (w as f64 * scale) as i32,
-                                        (h as f64 * scale) as i32,
-                                    )
-                                } else {
-                                    return Response::err("selection cancelled");
-                                }
-                            }
-                            _ => return Response::err("selection cancelled"),
-                        }
-                    }
-                    None => {
-                        // Fullscreen
-                        let (uw, uh) = frame.upright_size();
-                        Rect::new(0, 0, uw, uh)
-                    }
-                };
-
-                // High-performance crop and fdeflate PNG compression
-                let encoded = crop_and_encode(&frame, crop_rect);
                 let id = ulid::Ulid::new().to_string();
-
-                // Save to screenshots directory
                 let save_dir = paths::default_screenshot_dir();
                 let _ = fs::create_dir_all(&save_dir);
                 let now = chrono::Local::now();
                 let filename = format!("Capture-{}.png", now.format("%Y-%m-%d-%H%M%S"));
                 let file_path = save_dir.join(&filename);
+                let file_str = file_path.to_string_lossy().to_string();
+                let ui_bin = find_ui_bin();
 
-                if let Err(e) = fs::write(&file_path, &encoded.png) {
-                    return Response::err(format!("failed to save capture: {e}"));
+                // Chụp màn hình bằng /usr/sbin/screencapture để lấy ảnh Retina thực sự từ WindowServer
+                if let Some([x, y, w, h]) = rect {
+                    let r_arg = format!("-R{x},{y},{w},{h}");
+                    let output = Command::new("/usr/sbin/screencapture")
+                        .arg("-x")
+                        .arg(&r_arg)
+                        .arg(&file_path)
+                        .output();
+                    match output {
+                        Ok(out) if out.status.success() => {},
+                        Ok(out) => return Response::err(format!("screencapture failed: {}", String::from_utf8_lossy(&out.stderr))),
+                        Err(e) => return Response::err(format!("failed to execute screencapture: {e}")),
+                    }
+                } else if mode == "area" || mode.starts_with("text") {
+                    let output = Command::new(&ui_bin).arg("overlay").arg(&file_path).output();
+                    match output {
+                        Ok(out) if out.status.success() => {},
+                        Ok(out) => {
+                            let err_str = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                            if err_str.contains("Cancelled") {
+                                return Response::err("selection cancelled");
+                            } else {
+                                return Response::err(format!("overlay capture failed: {err_str}"));
+                            }
+                        }
+                        Err(e) => return Response::err(format!("failed to spawn overlay: {e}")),
+                    }
+                } else {
+                    // Fullscreen capture qua xChup UI
+                    let output = Command::new(&ui_bin).arg("fullscreen").arg(&file_path).output();
+                    match output {
+                        Ok(out) if out.status.success() => {},
+                        Ok(out) => return Response::err(format!("ui fullscreen failed (status {}): stdout='{}', stderr='{}'", out.status, String::from_utf8_lossy(&out.stdout).trim(), String::from_utf8_lossy(&out.stderr).trim())),
+                        Err(e) => return Response::err(format!("failed to spawn ui binary {}: {e}", ui_bin.display())),
+                    }
                 }
+
+                let file_bytes = match fs::read(&file_path) {
+                    Ok(b) => b,
+                    Err(e) => return Response::err(format!("failed to read capture: {e}")),
+                };
+                let (width, height) = get_png_dimensions(&file_bytes).unwrap_or((0, 0));
+                let file_len = file_bytes.len();
 
                 let is_text_mode = mode.starts_with("text");
                 let mut ocr_text = String::new();
 
                 if is_text_mode {
-                    let ui_bin = find_ui_bin();
-                    let output = Command::new(ui_bin).arg("ocr").arg(&file_path).output();
+                    let output = Command::new(&ui_bin).arg("ocr").arg(&file_path).output();
                     if let Ok(out) = output {
                         ocr_text = String::from_utf8_lossy(&out.stdout).trim().to_string();
                     }
@@ -183,10 +183,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         id: id.clone(),
                         created_at: now.timestamp(),
                         kind: if is_text_mode { "text".into() } else { "screenshot".into() },
-                        width: encoded.width,
-                        height: encoded.height,
-                        scale: frame.scale,
-                        output: frame.output.clone(),
+                        width,
+                        height,
+                        scale: 2.0,
+                        output: "main".into(),
                         source: file_path.clone(),
                         saved: Some(file_path.clone()),
                         app: None,
@@ -201,20 +201,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Show Quick Access Card thumbnail if not pure text mode
                 if !is_text_mode {
-                    let ui_bin = find_ui_bin();
-                    let file_str = file_path.to_string_lossy().to_string();
-                    let _ = Command::new(ui_bin).arg("card").arg(&file_str).spawn();
+                    let _ = Command::new(&ui_bin).arg("card").arg(&file_str).spawn();
                 }
 
                 Response::ok(json!({
                     "id": id,
                     "mode": mode,
-                    "path": file_path.to_string_lossy(),
-                    "width": encoded.width,
-                    "height": encoded.height,
-                    "crop_ms": encoded.crop_ms,
-                    "encode_ms": encoded.encode_ms,
-                    "bytes": encoded.png.len(),
+                    "path": file_str,
+                    "width": width,
+                    "height": height,
+                    "crop_ms": 0,
+                    "encode_ms": 0,
+                    "bytes": file_len,
                     "copied_to_clipboard": true,
                     "text": if is_text_mode { Some(ocr_text) } else { None },
                 }))
