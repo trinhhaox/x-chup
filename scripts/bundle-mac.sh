@@ -173,9 +173,9 @@ cat << 'PLIST_EOF' > "${CONTENTS_DIR}/Info.plist"
     <key>CFBundleIdentifier</key>
     <string>com.trinhhaox.xchup</string>
     <key>CFBundleVersion</key>
-    <string>1.0.0</string>
+    <string>0.1.0</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>0.1.0</string>
     <key>CFBundleExecutable</key>
     <string>xChup</string>
     <key>CFBundleIconFile</key>

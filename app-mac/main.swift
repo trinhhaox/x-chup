@@ -18,6 +18,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch cmd {
         case "tray", "app":
             runTray()
+        case "update":
+            runUpdate()
+        case "settings", "shortcuts", "preferences":
+            runShortcuts()
         case "overlay":
             runOverlay()
         case "card":
@@ -45,12 +49,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func printUsage() {
-        fputs("Usage: snip-ui <tray | overlay | card <image-path> | pin <image-path> | ocr <image-path>>\n", stderr)
+        fputs("Usage: snip-ui <tray | update | settings | overlay | card <image-path> | pin <image-path> | ocr <image-path>>\n", stderr)
     }
 
     func runTray() {
         NSApp.setActivationPolicy(.accessory)
         TrayController.shared.show()
+    }
+
+    func runShortcuts() {
+        NSApp.setActivationPolicy(.regular)
+        ShortcutPreferencesWindowController.shared.show()
+    }
+
+    func runUpdate() {
+        NSApp.setActivationPolicy(.accessory)
+        UpdateManager.shared.checkForUpdates(silent: false)
     }
 
     func runOverlay() {
@@ -503,7 +517,490 @@ final class OCRController {
     }
 }
 
-// MARK: - Global HotKeys (Carbon API)
+// MARK: - Global HotKeys & Shortcut Preferences
+
+struct ShortcutItem: Codable, Equatable {
+    var keyCode: UInt16
+    var modifiers: UInt32
+
+    var displayString: String {
+        return stringForCarbonModifiers(modifiers) + stringForKeyCode(keyCode)
+    }
+}
+
+func carbonModifiers(from flags: NSEvent.ModifierFlags) -> UInt32 {
+    var mods: UInt32 = 0
+    if flags.contains(.command) { mods |= UInt32(cmdKey) }
+    if flags.contains(.shift) { mods |= UInt32(shiftKey) }
+    if flags.contains(.option) { mods |= UInt32(optionKey) }
+    if flags.contains(.control) { mods |= UInt32(controlKey) }
+    return mods
+}
+
+func nsModifierFlags(from carbonMods: UInt32) -> NSEvent.ModifierFlags {
+    var flags: NSEvent.ModifierFlags = []
+    if (carbonMods & UInt32(cmdKey)) != 0 { flags.insert(.command) }
+    if (carbonMods & UInt32(shiftKey)) != 0 { flags.insert(.shift) }
+    if (carbonMods & UInt32(optionKey)) != 0 { flags.insert(.option) }
+    if (carbonMods & UInt32(controlKey)) != 0 { flags.insert(.control) }
+    return flags
+}
+
+func stringForCarbonModifiers(_ mods: UInt32) -> String {
+    var str = ""
+    if (mods & UInt32(controlKey)) != 0 { str += "⌃" }
+    if (mods & UInt32(optionKey)) != 0 { str += "⌥" }
+    if (mods & UInt32(shiftKey)) != 0 { str += "⇧" }
+    if (mods & UInt32(cmdKey)) != 0 { str += "⌘" }
+    return str
+}
+
+func stringForKeyCode(_ keyCode: UInt16) -> String {
+    switch Int(keyCode) {
+    case kVK_ANSI_A: return "A"
+    case kVK_ANSI_B: return "B"
+    case kVK_ANSI_C: return "C"
+    case kVK_ANSI_D: return "D"
+    case kVK_ANSI_E: return "E"
+    case kVK_ANSI_F: return "F"
+    case kVK_ANSI_G: return "G"
+    case kVK_ANSI_H: return "H"
+    case kVK_ANSI_I: return "I"
+    case kVK_ANSI_J: return "J"
+    case kVK_ANSI_K: return "K"
+    case kVK_ANSI_L: return "L"
+    case kVK_ANSI_M: return "M"
+    case kVK_ANSI_N: return "N"
+    case kVK_ANSI_O: return "O"
+    case kVK_ANSI_P: return "P"
+    case kVK_ANSI_Q: return "Q"
+    case kVK_ANSI_R: return "R"
+    case kVK_ANSI_S: return "S"
+    case kVK_ANSI_T: return "T"
+    case kVK_ANSI_U: return "U"
+    case kVK_ANSI_V: return "V"
+    case kVK_ANSI_W: return "W"
+    case kVK_ANSI_X: return "X"
+    case kVK_ANSI_Y: return "Y"
+    case kVK_ANSI_Z: return "Z"
+    case kVK_ANSI_0: return "0"
+    case kVK_ANSI_1: return "1"
+    case kVK_ANSI_2: return "2"
+    case kVK_ANSI_3: return "3"
+    case kVK_ANSI_4: return "4"
+    case kVK_ANSI_5: return "5"
+    case kVK_ANSI_6: return "6"
+    case kVK_ANSI_7: return "7"
+    case kVK_ANSI_8: return "8"
+    case kVK_ANSI_9: return "9"
+    case kVK_ANSI_Equal: return "="
+    case kVK_ANSI_Minus: return "-"
+    case kVK_ANSI_RightBracket: return "]"
+    case kVK_ANSI_LeftBracket: return "["
+    case kVK_ANSI_Quote: return "'"
+    case kVK_ANSI_Semicolon: return ";"
+    case kVK_ANSI_Backslash: return "\\"
+    case kVK_ANSI_Comma: return ","
+    case kVK_ANSI_Slash: return "/"
+    case kVK_ANSI_Period: return "."
+    case kVK_ANSI_Grave: return "`"
+    case kVK_Space: return "Space"
+    case kVK_Return: return "↩"
+    case kVK_Tab: return "⇥"
+    case kVK_F1: return "F1"
+    case kVK_F2: return "F2"
+    case kVK_F3: return "F3"
+    case kVK_F4: return "F4"
+    case kVK_F5: return "F5"
+    case kVK_F6: return "F6"
+    case kVK_F7: return "F7"
+    case kVK_F8: return "F8"
+    case kVK_F9: return "F9"
+    case kVK_F10: return "F10"
+    case kVK_F11: return "F11"
+    case kVK_F12: return "F12"
+    default:
+        return "?"
+    }
+}
+
+func keyEquivalentString(_ item: ShortcutItem) -> String {
+    let keyStr = stringForKeyCode(item.keyCode)
+    if keyStr.count == 1 {
+        return keyStr.lowercased()
+    }
+    return ""
+}
+
+struct ShortcutSettings: Codable {
+    var area: ShortcutItem
+    var fullscreen: ShortcutItem
+    var ocr: ShortcutItem
+    var pin: ShortcutItem
+    var record: ShortcutItem
+
+    static var defaultSettings: ShortcutSettings {
+        let cmdShift = UInt32(cmdKey | shiftKey)
+        return ShortcutSettings(
+            area: ShortcutItem(keyCode: UInt16(kVK_ANSI_4), modifiers: cmdShift),
+            fullscreen: ShortcutItem(keyCode: UInt16(kVK_ANSI_3), modifiers: cmdShift),
+            ocr: ShortcutItem(keyCode: UInt16(kVK_ANSI_6), modifiers: cmdShift),
+            pin: ShortcutItem(keyCode: UInt16(kVK_ANSI_5), modifiers: cmdShift),
+            record: ShortcutItem(keyCode: UInt16(kVK_ANSI_7), modifiers: cmdShift)
+        )
+    }
+
+    static func load() -> ShortcutSettings {
+        if let data = UserDefaults.standard.data(forKey: "xChup_Shortcuts"),
+           let decoded = try? JSONDecoder().decode(ShortcutSettings.self, from: data) {
+            return decoded
+        }
+        return defaultSettings
+    }
+
+    func save() {
+        if let data = try? JSONEncoder().encode(self) {
+            UserDefaults.standard.set(data, forKey: "xChup_Shortcuts")
+        }
+    }
+}
+
+final class KeyRecorderButton: NSButton {
+    var shortcut: ShortcutItem {
+        didSet {
+            updateTitle()
+        }
+    }
+    private(set) var isRecording = false
+    var onShortcutChanged: ((ShortcutItem) -> Void)?
+
+    init(shortcut: ShortcutItem) {
+        self.shortcut = shortcut
+        super.init(frame: .zero)
+        bezelStyle = .rounded
+        setButtonType(.momentaryPushIn)
+        target = self
+        action = #selector(buttonClicked)
+        font = NSFont.monospacedSystemFont(ofSize: 13, weight: .semibold)
+        updateTitle()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    @objc private func buttonClicked() {
+        if isRecording {
+            stopRecording()
+        } else {
+            startRecording()
+        }
+    }
+
+    func startRecording() {
+        ShortcutPreferencesWindowController.shared.cancelAllRecordings(except: self)
+        isRecording = true
+        title = "Nhấn tổ hợp phím..."
+        window?.makeFirstResponder(self)
+    }
+
+    func stopRecording() {
+        isRecording = false
+        updateTitle()
+    }
+
+    private func updateTitle() {
+        title = shortcut.displayString.isEmpty ? "Chưa đặt" : shortcut.displayString
+    }
+
+    override var acceptsFirstResponder: Bool {
+        return true
+    }
+
+    override func resignFirstResponder() -> Bool {
+        if isRecording {
+            isRecording = false
+            updateTitle()
+        }
+        return super.resignFirstResponder()
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if isRecording {
+            handleKeyEvent(event)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if isRecording {
+            handleKeyEvent(event)
+        } else {
+            super.keyDown(with: event)
+        }
+    }
+
+    private func handleKeyEvent(_ event: NSEvent) {
+        let keyCode = event.keyCode
+        if keyCode == 53 { // Escape
+            stopRecording()
+            return
+        }
+
+        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        let carbonMods = carbonModifiers(from: flags)
+
+        guard carbonMods != 0 else {
+            NSSound.beep()
+            return
+        }
+
+        let newItem = ShortcutItem(keyCode: keyCode, modifiers: carbonMods)
+        self.shortcut = newItem
+        stopRecording()
+        onShortcutChanged?(newItem)
+    }
+}
+
+final class ShortcutPreferencesWindowController: NSWindowController {
+    static let shared = ShortcutPreferencesWindowController()
+
+    private var areaButton: KeyRecorderButton!
+    private var fullButton: KeyRecorderButton!
+    private var ocrButton: KeyRecorderButton!
+    private var pinButton: KeyRecorderButton!
+    private var recordButton: KeyRecorderButton!
+
+    private var buttons: [KeyRecorderButton] {
+        return [areaButton, fullButton, ocrButton, pinButton, recordButton].compactMap { $0 }
+    }
+
+    init() {
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 490, height: 440),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        win.title = "Cài đặt phím tắt • xChup"
+        win.center()
+        win.isReleasedWhenClosed = false
+        super.init(window: win)
+        setupUI()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func show() {
+        refreshUI()
+        window?.center()
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+    }
+
+    func cancelAllRecordings(except current: KeyRecorderButton?) {
+        for btn in buttons where btn != current {
+            if btn.isRecording {
+                btn.stopRecording()
+            }
+        }
+    }
+
+    private func setupUI() {
+        guard let win = window else { return }
+        let root = NSView(frame: win.contentView!.bounds)
+        root.autoresizingMask = [.width, .height]
+        win.contentView = root
+
+        let titleLabel = NSTextField(labelWithString: "Cài đặt phím tắt toàn cầu")
+        titleLabel.font = NSFont.systemFont(ofSize: 15, weight: .bold)
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(titleLabel)
+
+        let descLabel = NSTextField(labelWithString: "Nhấp vào ô phím tắt và nhấn tổ hợp phím mong muốn (ESC để hủy).")
+        descLabel.font = NSFont.systemFont(ofSize: 12)
+        descLabel.textColor = .secondaryLabelColor
+        descLabel.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(descLabel)
+
+        let card = NSBox()
+        card.boxType = .custom
+        card.cornerRadius = 10
+        card.borderWidth = 1
+        card.borderColor = .separatorColor
+        card.fillColor = NSColor.controlBackgroundColor.withAlphaComponent(0.6)
+        card.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(card)
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.distribution = .fillEqually
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        card.contentView = stack
+
+        let settings = ShortcutSettings.load()
+
+        areaButton = KeyRecorderButton(shortcut: settings.area)
+        areaButton.onShortcutChanged = { [weak self] item in
+            self?.updateShortcut(\.area, to: item)
+        }
+
+        fullButton = KeyRecorderButton(shortcut: settings.fullscreen)
+        fullButton.onShortcutChanged = { [weak self] item in
+            self?.updateShortcut(\.fullscreen, to: item)
+        }
+
+        ocrButton = KeyRecorderButton(shortcut: settings.ocr)
+        ocrButton.onShortcutChanged = { [weak self] item in
+            self?.updateShortcut(\.ocr, to: item)
+        }
+
+        pinButton = KeyRecorderButton(shortcut: settings.pin)
+        pinButton.onShortcutChanged = { [weak self] item in
+            self?.updateShortcut(\.pin, to: item)
+        }
+
+        recordButton = KeyRecorderButton(shortcut: settings.record)
+        recordButton.onShortcutChanged = { [weak self] item in
+            self?.updateShortcut(\.record, to: item)
+        }
+
+        stack.addArrangedSubview(makeRow(title: "Chụp vùng (Area)", subtitle: "Kéo chuột chọn vùng cần chụp", button: areaButton))
+        stack.addArrangedSubview(makeRow(title: "Chụp toàn màn hình (Fullscreen)", subtitle: "Chụp tức thì toàn bộ màn hình", button: fullButton))
+        stack.addArrangedSubview(makeRow(title: "Nhận diện chữ & QR (OCR)", subtitle: "Trích xuất văn bản vào clipboard", button: ocrButton))
+        stack.addArrangedSubview(makeRow(title: "Ghim ảnh nổi (Pin Image)", subtitle: "Ghim ảnh chụp nổi trên màn hình", button: pinButton))
+        stack.addArrangedSubview(makeRow(title: "Quay màn hình (Record)", subtitle: "Bật / Dừng quay video màn hình", button: recordButton))
+
+        let resetBtn = NSButton(title: "↺ Đặt lại mặc định", target: self, action: #selector(actionReset))
+        resetBtn.bezelStyle = .rounded
+        resetBtn.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(resetBtn)
+
+        let closeBtn = NSButton(title: "Đóng", target: self, action: #selector(actionClose))
+        closeBtn.bezelStyle = .rounded
+        closeBtn.keyEquivalent = "\r"
+        closeBtn.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(closeBtn)
+
+        NSLayoutConstraint.activate([
+            titleLabel.topAnchor.constraint(equalTo: root.topAnchor, constant: 18),
+            titleLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
+            titleLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
+
+            descLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
+            descLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            descLabel.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+
+            card.topAnchor.constraint(equalTo: descLabel.bottomAnchor, constant: 14),
+            card.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
+            card.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
+
+            stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 10),
+            stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 12),
+            stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -12),
+            stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -10),
+
+            resetBtn.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
+            resetBtn.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16),
+
+            closeBtn.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
+            closeBtn.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16),
+            closeBtn.topAnchor.constraint(equalTo: card.bottomAnchor, constant: 16)
+        ])
+    }
+
+    private func makeRow(title: String, subtitle: String, button: NSButton) -> NSView {
+        let row = NSView()
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        let tLabel = NSTextField(labelWithString: title)
+        tLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        tLabel.translatesAutoresizingMaskIntoConstraints = false
+        row.addSubview(tLabel)
+
+        let sLabel = NSTextField(labelWithString: subtitle)
+        sLabel.font = NSFont.systemFont(ofSize: 11)
+        sLabel.textColor = .secondaryLabelColor
+        sLabel.translatesAutoresizingMaskIntoConstraints = false
+        row.addSubview(sLabel)
+
+        button.translatesAutoresizingMaskIntoConstraints = false
+        row.addSubview(button)
+
+        NSLayoutConstraint.activate([
+            row.heightAnchor.constraint(equalToConstant: 44),
+
+            tLabel.topAnchor.constraint(equalTo: row.topAnchor, constant: 4),
+            tLabel.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 4),
+
+            sLabel.topAnchor.constraint(equalTo: tLabel.bottomAnchor, constant: 2),
+            sLabel.leadingAnchor.constraint(equalTo: tLabel.leadingAnchor),
+
+            button.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            button.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -4),
+            button.widthAnchor.constraint(equalToConstant: 130),
+            button.heightAnchor.constraint(equalToConstant: 28),
+
+            button.leadingAnchor.constraint(greaterThanOrEqualTo: tLabel.trailingAnchor, constant: 10)
+        ])
+        return row
+    }
+
+    private func updateShortcut(_ keyPath: WritableKeyPath<ShortcutSettings, ShortcutItem>, to item: ShortcutItem) {
+        var settings = ShortcutSettings.load()
+
+        let all: [(String, ShortcutItem)] = [
+            ("Chụp vùng", settings.area),
+            ("Chụp toàn màn hình", settings.fullscreen),
+            ("Nhận diện chữ & QR", settings.ocr),
+            ("Ghim ảnh nổi", settings.pin),
+            ("Quay màn hình", settings.record)
+        ]
+
+        for (name, existing) in all {
+            if existing == item && settings[keyPath: keyPath] != existing {
+                NSSound.beep()
+                let alert = NSAlert()
+                alert.messageText = "Phím tắt bị trùng"
+                alert.informativeText = "Tổ hợp phím \(item.displayString) đang được sử dụng cho chức năng '\(name)'. Vui lòng chọn tổ hợp phím khác."
+                alert.alertStyle = .warning
+                alert.addButton(withTitle: "Đã hiểu")
+                alert.runModal()
+                refreshUI()
+                return
+            }
+        }
+
+        settings[keyPath: keyPath] = item
+        settings.save()
+        HotKeyManager.shared.reload()
+        TrayController.shared.buildMenu()
+        showNotification(title: "xChup", text: "Đã lưu phím tắt mới: \(item.displayString)")
+    }
+
+    func refreshUI() {
+        let settings = ShortcutSettings.load()
+        areaButton?.shortcut = settings.area
+        fullButton?.shortcut = settings.fullscreen
+        ocrButton?.shortcut = settings.ocr
+        pinButton?.shortcut = settings.pin
+        recordButton?.shortcut = settings.record
+    }
+
+    @objc private func actionReset() {
+        let def = ShortcutSettings.defaultSettings
+        def.save()
+        refreshUI()
+        HotKeyManager.shared.reload()
+        TrayController.shared.buildMenu()
+        showNotification(title: "xChup", text: "Đã khôi phục phím tắt mặc định.")
+    }
+
+    @objc private func actionClose() {
+        window?.close()
+    }
+}
 
 final class HotKeyManager {
     static let shared = HotKeyManager()
@@ -552,7 +1049,44 @@ final class HotKeyManager {
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
         InstallEventHandler(GetApplicationEventTarget(), handler, 1, &eventType, selfPtr, &handlerRef)
 
-        registerKeys()
+        reload()
+    }
+
+    func reload() {
+        for ref in hotKeyRefs {
+            UnregisterEventHotKey(ref)
+        }
+        hotKeyRefs.removeAll()
+
+        let settings = ShortcutSettings.load()
+        registerItem(settings.area, id: .area)
+        registerItem(settings.fullscreen, id: .fullscreen)
+        registerItem(settings.ocr, id: .ocr)
+        registerItem(settings.pin, id: .pin)
+        registerItem(settings.record, id: .record)
+
+        // Đăng ký bổ sung Control+Shift nếu dùng mặc định Command+Shift
+        let cmdShift = UInt32(cmdKey | shiftKey)
+        let ctrlShift = UInt32(controlKey | shiftKey)
+        if settings.area.modifiers == cmdShift {
+            registerKey(keyCode: Int(settings.area.keyCode), modifiers: ctrlShift, id: .area)
+        }
+        if settings.fullscreen.modifiers == cmdShift {
+            registerKey(keyCode: Int(settings.fullscreen.keyCode), modifiers: ctrlShift, id: .fullscreen)
+        }
+        if settings.ocr.modifiers == cmdShift {
+            registerKey(keyCode: Int(settings.ocr.keyCode), modifiers: ctrlShift, id: .ocr)
+        }
+        if settings.pin.modifiers == cmdShift {
+            registerKey(keyCode: Int(settings.pin.keyCode), modifiers: ctrlShift, id: .pin)
+        }
+        if settings.record.modifiers == cmdShift {
+            registerKey(keyCode: Int(settings.record.keyCode), modifiers: ctrlShift, id: .record)
+        }
+    }
+
+    private func registerItem(_ item: ShortcutItem, id: Action) {
+        registerKey(keyCode: Int(item.keyCode), modifiers: item.modifiers, id: id)
     }
 
     private func registerKey(keyCode: Int, modifiers: UInt32, id: Action) {
@@ -562,31 +1096,6 @@ final class HotKeyManager {
         if err == noErr, let r = ref {
             hotKeyRefs.append(r)
         }
-    }
-
-    private func registerKeys() {
-        let cmdShift = UInt32(cmdKey | shiftKey)
-        let ctrlShift = UInt32(controlKey | shiftKey)
-
-        // 3: Fullscreen
-        registerKey(keyCode: kVK_ANSI_3, modifiers: cmdShift, id: .fullscreen)
-        registerKey(keyCode: kVK_ANSI_3, modifiers: ctrlShift, id: .fullscreen)
-
-        // 4: Area Capture
-        registerKey(keyCode: kVK_ANSI_4, modifiers: cmdShift, id: .area)
-        registerKey(keyCode: kVK_ANSI_4, modifiers: ctrlShift, id: .area)
-
-        // 5: Pin
-        registerKey(keyCode: kVK_ANSI_5, modifiers: cmdShift, id: .pin)
-        registerKey(keyCode: kVK_ANSI_5, modifiers: ctrlShift, id: .pin)
-
-        // 6: OCR
-        registerKey(keyCode: kVK_ANSI_6, modifiers: cmdShift, id: .ocr)
-        registerKey(keyCode: kVK_ANSI_6, modifiers: ctrlShift, id: .ocr)
-
-        // 7: Record
-        registerKey(keyCode: kVK_ANSI_7, modifiers: cmdShift, id: .record)
-        registerKey(keyCode: kVK_ANSI_7, modifiers: ctrlShift, id: .record)
     }
 
     deinit {
@@ -685,6 +1194,203 @@ func showNotification(title: String, text: String) {
     try? task.run()
 }
 
+// MARK: - Auto Updater (GitHub Releases)
+
+final class UpdateManager {
+    static let shared = UpdateManager()
+    let repo = "trinhhaox/x-chup"
+    var currentVersion: String {
+        return Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
+    }
+
+    struct ReleaseInfo {
+        let version: String
+        let title: String
+        let notes: String
+        let zipURL: URL
+    }
+
+    var availableUpdate: ReleaseInfo?
+
+    static func isVersion(_ v1: String, newerThan v2: String) -> Bool {
+        let clean1 = v1.trimmingCharacters(in: CharacterSet(charactersIn: "vV "))
+        let clean2 = v2.trimmingCharacters(in: CharacterSet(charactersIn: "vV "))
+        let p1 = clean1.split(separator: ".").compactMap { Int($0) }
+        let p2 = clean2.split(separator: ".").compactMap { Int($0) }
+        for (a, b) in zip(p1, p2) {
+            if a > b { return true }
+            if a < b { return false }
+        }
+        return p1.count > p2.count
+    }
+
+    func checkForUpdates(silent: Bool, completion: ((Bool) -> Void)? = nil) {
+        guard let url = URL(string: "https://api.github.com/repos/\(repo)/releases/latest") else { return }
+        var request = URLRequest(url: url)
+        request.setValue("application/vnd.github.v3+json", forHTTPHeaderField: "Accept")
+        request.setValue("xChup-AutoUpdater", forHTTPHeaderField: "User-Agent")
+
+        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+            guard let data = data, error == nil,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let tagName = json["tag_name"] as? String else {
+                if !silent {
+                    DispatchQueue.main.async {
+                        self.showErrorAlert("Không thể kiểm tra cập nhật. Vui lòng kiểm tra lại kết nối mạng.")
+                    }
+                }
+                completion?(false)
+                return
+            }
+
+            let releaseTitle = json["name"] as? String ?? tagName
+            let notes = json["body"] as? String ?? ""
+            let assets = json["assets"] as? [[String: Any]] ?? []
+
+            guard let zipAsset = assets.first(where: {
+                ($0["name"] as? String)?.contains(".zip") == true
+            }),
+            let downloadStr = zipAsset["browser_download_url"] as? String,
+            let downloadURL = URL(string: downloadStr) else {
+                if !silent {
+                    DispatchQueue.main.async {
+                        self.showErrorAlert("Không tìm thấy gói cập nhật tương thích trên GitHub.")
+                    }
+                }
+                completion?(false)
+                return
+            }
+
+            let release = ReleaseInfo(
+                version: tagName,
+                title: releaseTitle,
+                notes: notes,
+                zipURL: downloadURL
+            )
+
+            let hasNewVersion = Self.isVersion(tagName, newerThan: self.currentVersion)
+
+            DispatchQueue.main.async {
+                if hasNewVersion {
+                    self.availableUpdate = release
+                    if !silent {
+                        self.promptUpdate(release: release)
+                    } else {
+                        showNotification(
+                            title: "xChup - Có bản cập nhật mới",
+                            text: "Phiên bản \(release.version) đã sẵn sàng. Nhấp Menu Bar để cập nhật."
+                        )
+                    }
+                } else if !silent {
+                    self.showUpToDateAlert()
+                }
+                completion?(hasNewVersion)
+            }
+        }
+        task.resume()
+    }
+
+    func promptUpdate(release: ReleaseInfo) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Có bản cập nhật mới: \(release.version)"
+        alert.informativeText = "Phiên bản hiện tại: v\(currentVersion)\nPhiên bản mới nhất: \(release.version)\n\nNội dung cập nhật:\n\(release.notes)"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Cập nhật ngay")
+        alert.addButton(withTitle: "Để sau")
+
+        if alert.runModal() == .alertFirstButtonReturn {
+            self.downloadAndApplyUpdate(release: release)
+        }
+    }
+
+    private func showUpToDateAlert() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Bạn đang dùng phiên bản mới nhất"
+        alert.informativeText = "xChup hiện đang ở phiên bản v\(currentVersion)."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Đã hiểu")
+        alert.runModal()
+    }
+
+    private func showErrorAlert(_ msg: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Kiểm tra cập nhật"
+        alert.informativeText = msg
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Đóng")
+        alert.runModal()
+    }
+
+    func downloadAndApplyUpdate(release: ReleaseInfo) {
+        showNotification(title: "xChup Update", text: "Đang tải bản cập nhật \(release.version)...")
+
+        let session = URLSession.shared
+        let downloadTask = session.downloadTask(with: release.zipURL) { tempURL, response, error in
+            guard let tempURL = tempURL, error == nil else {
+                DispatchQueue.main.async {
+                    self.showErrorAlert("Tải bản cập nhật thất bại: \(error?.localizedDescription ?? "Lỗi không xác định")")
+                }
+                return
+            }
+
+            let updateZip = "/tmp/xChup_update.zip"
+            let extractedDir = "/tmp/xChup_extracted"
+
+            try? FileManager.default.removeItem(atPath: updateZip)
+            try? FileManager.default.removeItem(atPath: extractedDir)
+            try? FileManager.default.moveItem(at: tempURL, to: URL(fileURLWithPath: updateZip))
+            try? FileManager.default.createDirectory(atPath: extractedDir, withIntermediateDirectories: true)
+
+            let ditto = Process()
+            ditto.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+            ditto.arguments = ["-x", "-k", updateZip, extractedDir]
+            try? ditto.run()
+            ditto.waitUntilExit()
+
+            let newApp = "\(extractedDir)/xChup.app"
+            guard FileManager.default.fileExists(atPath: newApp) else {
+                DispatchQueue.main.async {
+                    self.showErrorAlert("Gói cập nhật không hợp lệ.")
+                }
+                return
+            }
+
+            let myPid = ProcessInfo.processInfo.processIdentifier
+            let script = """
+            while kill -0 \(myPid) 2>/dev/null; do sleep 0.2; done
+            rm -rf "/Applications/xChup.app"
+            mv "\(newApp)" "/Applications/xChup.app"
+            codesign --force --deep --sign - "/Applications/xChup.app" 2>/dev/null || true
+            /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "/Applications/xChup.app"
+            open "/Applications/xChup.app"
+            rm -rf "\(extractedDir)" "\(updateZip)"
+            """
+
+            let scriptURL = URL(fileURLWithPath: "/tmp/apply_xchup_update.sh")
+            try? script.write(to: scriptURL, atomically: true, encoding: .utf8)
+
+            let chmod = Process()
+            chmod.executableURL = URL(fileURLWithPath: "/bin/chmod")
+            chmod.arguments = ["+x", scriptURL.path]
+            try? chmod.run()
+            chmod.waitUntilExit()
+
+            let bg = Process()
+            bg.executableURL = URL(fileURLWithPath: "/bin/sh")
+            bg.arguments = [scriptURL.path]
+            try? bg.run()
+
+            DispatchQueue.main.async {
+                NSApp.terminate(nil)
+            }
+        }
+        downloadTask.resume()
+    }
+}
+
 final class TrayController: NSObject, NSMenuDelegate {
     static let shared = TrayController()
     private var statusItem: NSStatusItem?
@@ -711,6 +1417,17 @@ final class TrayController: NSObject, NSMenuDelegate {
             self?.handleHotKey(action)
         }
         HotKeyManager.shared.setup()
+
+        // Background check for updates (silent)
+        DispatchQueue.global(qos: .background).asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            UpdateManager.shared.checkForUpdates(silent: true) { hasNewVersion in
+                if hasNewVersion {
+                    DispatchQueue.main.async {
+                        self?.buildMenu()
+                    }
+                }
+            }
+        }
     }
 
     private func updateButtonIcon() {
@@ -725,7 +1442,7 @@ final class TrayController: NSObject, NSMenuDelegate {
         }
     }
 
-    private func buildMenu() {
+    func buildMenu() {
         menu.removeAllItems()
 
         let titleItem = NSMenuItem(title: "xChup • CleanShot X", action: nil, keyEquivalent: "")
@@ -733,32 +1450,34 @@ final class TrayController: NSObject, NSMenuDelegate {
         menu.addItem(titleItem)
         menu.addItem(NSMenuItem.separator())
 
-        let areaItem = NSMenuItem(title: "Chụp vùng (Area)", action: #selector(actionArea), keyEquivalent: "4")
-        areaItem.keyEquivalentModifierMask = [.command, .shift]
+        let settings = ShortcutSettings.load()
+
+        let areaItem = NSMenuItem(title: "Chụp vùng (Area)", action: #selector(actionArea), keyEquivalent: keyEquivalentString(settings.area))
+        areaItem.keyEquivalentModifierMask = nsModifierFlags(from: settings.area.modifiers)
         areaItem.target = self
         menu.addItem(areaItem)
 
-        let fullItem = NSMenuItem(title: "Chụp toàn màn hình (Fullscreen)", action: #selector(actionFullscreen), keyEquivalent: "3")
-        fullItem.keyEquivalentModifierMask = [.command, .shift]
+        let fullItem = NSMenuItem(title: "Chụp toàn màn hình (Fullscreen)", action: #selector(actionFullscreen), keyEquivalent: keyEquivalentString(settings.fullscreen))
+        fullItem.keyEquivalentModifierMask = nsModifierFlags(from: settings.fullscreen.modifiers)
         fullItem.target = self
         menu.addItem(fullItem)
 
-        let ocrItem = NSMenuItem(title: "Nhận diện chữ & QR (OCR)", action: #selector(actionOCR), keyEquivalent: "6")
-        ocrItem.keyEquivalentModifierMask = [.command, .shift]
+        let ocrItem = NSMenuItem(title: "Nhận diện chữ & QR (OCR)", action: #selector(actionOCR), keyEquivalent: keyEquivalentString(settings.ocr))
+        ocrItem.keyEquivalentModifierMask = nsModifierFlags(from: settings.ocr.modifiers)
         ocrItem.target = self
         menu.addItem(ocrItem)
 
-        let pinItem = NSMenuItem(title: "Ghim ảnh nổi (Pin Image)", action: #selector(actionPin), keyEquivalent: "5")
-        pinItem.keyEquivalentModifierMask = [.command, .shift]
+        let pinItem = NSMenuItem(title: "Ghim ảnh nổi (Pin Image)", action: #selector(actionPin), keyEquivalent: keyEquivalentString(settings.pin))
+        pinItem.keyEquivalentModifierMask = nsModifierFlags(from: settings.pin.modifiers)
         pinItem.target = self
         menu.addItem(pinItem)
 
         let recordItem = NSMenuItem(
             title: isRecording ? "⏹ Dừng quay màn hình (Stop Recording)" : "🎥 Quay màn hình (Record Screen)",
             action: #selector(actionToggleRecord),
-            keyEquivalent: "7"
+            keyEquivalent: keyEquivalentString(settings.record)
         )
-        recordItem.keyEquivalentModifierMask = [.command, .shift]
+        recordItem.keyEquivalentModifierMask = nsModifierFlags(from: settings.record.modifiers)
         recordItem.target = self
         menu.addItem(recordItem)
 
@@ -778,13 +1497,50 @@ final class TrayController: NSObject, NSMenuDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
+        let shortcutsItem = NSMenuItem(title: "Cài đặt phím tắt...", action: #selector(actionOpenShortcuts), keyEquivalent: ",")
+        shortcutsItem.keyEquivalentModifierMask = [.command]
+        shortcutsItem.target = self
+        menu.addItem(shortcutsItem)
+
         let guideItem = NSMenuItem(title: "Phím tắt & Hướng dẫn", action: #selector(actionShowGuide), keyEquivalent: "")
         guideItem.target = self
         menu.addItem(guideItem)
 
+        menu.addItem(NSMenuItem.separator())
+
+        if let update = UpdateManager.shared.availableUpdate {
+            let updateItem = NSMenuItem(
+                title: "🔴 Có bản cập nhật mới (\(update.version))...",
+                action: #selector(actionCheckUpdates),
+                keyEquivalent: ""
+            )
+            updateItem.target = self
+            menu.addItem(updateItem)
+        } else {
+            let updateItem = NSMenuItem(
+                title: "Kiểm tra cập nhật...",
+                action: #selector(actionCheckUpdates),
+                keyEquivalent: ""
+            )
+            updateItem.target = self
+            menu.addItem(updateItem)
+        }
+
         let quitItem = NSMenuItem(title: "Thoát xChup", action: #selector(actionQuit), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
+    }
+
+    @objc func actionCheckUpdates() {
+        if let update = UpdateManager.shared.availableUpdate {
+            UpdateManager.shared.promptUpdate(release: update)
+        } else {
+            UpdateManager.shared.checkForUpdates(silent: false) { [weak self] hasNew in
+                if hasNew {
+                    self?.buildMenu()
+                }
+            }
+        }
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -950,16 +1706,17 @@ final class TrayController: NSObject, NSMenuDelegate {
     }
 
     @objc func actionShowGuide() {
+        let settings = ShortcutSettings.load()
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = "xChup - CleanShot X for Mac"
         alert.informativeText = """
         Phím tắt toàn cầu (Global Shortcuts):
-        • ⌘⇧4 (hoặc ⌃⇧4): Chụp vùng màn hình (Area Capture)
-        • ⌘⇧3 (hoặc ⌃⇧3): Chụp toàn màn hình (Fullscreen)
-        • ⌘⇧6 (hoặc ⌃⇧6): Nhận diện chữ & mã QR (OCR Text)
-        • ⌘⇧5 (hoặc ⌃⇧5): Ghim ảnh nổi lên màn hình (Pin Image)
-        • ⌘⇧7 (hoặc ⌃⇧7): Bật / Dừng quay màn hình (Screen Record)
+        • \(settings.area.displayString): Chụp vùng màn hình (Area Capture)
+        • \(settings.fullscreen.displayString): Chụp toàn màn hình (Fullscreen)
+        • \(settings.ocr.displayString): Nhận diện chữ & mã QR (OCR Text)
+        • \(settings.pin.displayString): Ghim ảnh nổi lên màn hình (Pin Image)
+        • \(settings.record.displayString): Bật / Dừng quay màn hình (Screen Record)
 
         Tính năng nâng cao:
         • Quick Access Card: Kéo thả file trực tiếp vào Telegram, Slack, VSCode.
@@ -968,7 +1725,14 @@ final class TrayController: NSObject, NSMenuDelegate {
         """
         alert.alertStyle = .informational
         alert.addButton(withTitle: "Đã hiểu")
-        alert.runModal()
+        alert.addButton(withTitle: "Cài đặt phím tắt...")
+        if alert.runModal() == .alertSecondButtonReturn {
+            actionOpenShortcuts()
+        }
+    }
+
+    @objc func actionOpenShortcuts() {
+        ShortcutPreferencesWindowController.shared.show()
     }
 
     @objc func actionQuit() {
