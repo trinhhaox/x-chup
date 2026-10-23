@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["crates/snip-core", "crates/snip-wayland", "crates/snip-hypr", "crates/snip-ipc", "crates/snip-cli", "crates/snip-bridge"]
+members = ["crates/snip-core", "crates/snip-darwin", "crates/snip-daemon", "crates/snip-wayland", "crates/snip-hypr", "crates/snip-ipc", "crates/snip-cli", "crates/snip-bridge"]
+default-members = ["crates/snip-core", "crates/snip-darwin", "crates/snip-daemon", "crates/snip-ipc", "crates/snip-cli"]
 
 [workspace.package]
 version = "0.1.0"
@@ -21,7 +22,10 @@ rxing = { version = "0.9", default-features = false, features = ["decoders", "mu
 qrcode = { version = "0.14", default-features = false }
 image-webp = "0.2"
 zip = { version = "2", default-features = false }
-rustix = { version = "1", features = ["fs", "mm", "time", "pipe", "net", "process"] }
+rustix = { version = "1", features = ["fs", "mm", "time", "pipe", "net", "process", "shm"] }
+libc = "0.2"
+core-graphics = "0.25"
+core-foundation = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 ulid = "1"
 calloop = "0.14"

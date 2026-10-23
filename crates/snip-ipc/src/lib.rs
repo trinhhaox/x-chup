@@ -166,7 +166,16 @@ pub fn serve(handle: impl Fn(Request) -> Response + Send + Sync + 'static) -> st
     let uid = rustix::process::getuid();
     std::thread::Builder::new().name("snip-ctl".into()).spawn(move || {
         for stream in listener.incoming().flatten() {
+            #[cfg(target_os = "linux")]
             let ok_peer = rustix::net::sockopt::socket_peercred(&stream).map(|c| c.uid == uid).unwrap_or(false);
+            #[cfg(not(target_os = "linux"))]
+            let ok_peer = {
+                use std::os::fd::AsRawFd;
+                let mut peer_uid = 0;
+                let mut peer_gid = 0;
+                let ret = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut peer_uid, &mut peer_gid) };
+                ret == 0 && peer_uid == uid.as_raw()
+            };
             if !ok_peer {
                 continue;
             }

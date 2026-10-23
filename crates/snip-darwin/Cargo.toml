@@ -1,0 +1,12 @@
+[package]
+name = "snip-darwin"
+description = "Snip macOS platform backend: Screen capture, display enumeration, and window metadata"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+snip-core = { path = "../snip-core" }
+core-graphics.workspace = true
+core-foundation.workspace = true
+libc.workspace = true

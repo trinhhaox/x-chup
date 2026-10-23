@@ -1,0 +1,19 @@
+[package]
+name = "snip-daemon"
+description = "snipd: native background daemon for macOS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "snipd"
+path = "src/main.rs"
+
+[dependencies]
+snip-core = { path = "../snip-core" }
+snip-ipc = { path = "../snip-ipc" }
+snip-darwin = { path = "../snip-darwin" }
+serde_json.workspace = true
+chrono.workspace = true
+ulid.workspace = true
+libc.workspace = true

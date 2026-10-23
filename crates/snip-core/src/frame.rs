@@ -4,7 +4,9 @@
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::Arc;
 
-use rustix::fs::{ftruncate, memfd_create, MemfdFlags};
+use rustix::fs::ftruncate;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use rustix::fs::{memfd_create, MemfdFlags};
 use rustix::mm::{madvise, mmap, munmap, Advice, MapFlags, ProtFlags};
 
 use crate::geometry::{Rect, Transform};
@@ -50,14 +52,33 @@ impl ShmBuf {
     pub fn new(width: u32, height: u32, format: PixelFormat) -> std::io::Result<Self> {
         let stride = width * 4;
         let len = (stride as usize) * height as usize;
+
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         let fd = memfd_create("snip-frame", MemfdFlags::CLOEXEC)?;
+
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let fd = {
+            let id = ulid::Ulid::new();
+            let name = format!("/s-{}", &id.to_string()[..24]);
+            let fd = rustix::shm::open(
+                &name,
+                rustix::shm::OFlags::CREATE | rustix::shm::OFlags::EXCL | rustix::shm::OFlags::RDWR,
+                rustix::shm::Mode::RUSR | rustix::shm::Mode::WUSR,
+            )?;
+            let _ = rustix::shm::unlink(&name);
+            fd
+        };
+
         ftruncate(&fd, len as u64)?;
         let ptr = unsafe { mmap(std::ptr::null_mut(), len, ProtFlags::READ | ProtFlags::WRITE, MapFlags::SHARED, &fd, 0)? } as *mut u8;
         unsafe {
             // Pre-fault so the compositor's first copy doesn't pay page faults,
             // and keep screenshots (possibly secrets) out of core dumps.
             std::ptr::write_bytes(ptr, 0, len);
+            #[cfg(target_os = "linux")]
             let _ = madvise(ptr.cast(), len, Advice::LinuxDontDump);
+            #[cfg(not(target_os = "linux"))]
+            let _ = madvise(ptr.cast(), len, Advice::Normal);
         }
         Ok(Self { fd, ptr, len, width, height, stride, format })
     }
