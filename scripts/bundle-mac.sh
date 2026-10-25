@@ -151,6 +151,10 @@ pkill -9 -x snipd 2>/dev/null || true
 pkill -9 -x snip-ui 2>/dev/null || true
 sleep 1
 
+# Ghi nhận bản cũ có ký ad-hoc không, để chỉ reset quyền TCC một lần khi chuyển sang chữ ký cố định
+PREV_ADHOC=0
+if codesign -dv "${APP_DIR}" 2>&1 | grep -q "Signature=adhoc"; then PREV_ADHOC=1; fi
+
 rm -rf "${APP_DIR}"
 mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}"
 
@@ -200,7 +204,21 @@ PLIST_EOF
 echo "APPL????" > "${CONTENTS_DIR}/PkgInfo"
 
 echo "==> 5. Codesigning ${APP_DIR}..."
-codesign --force --deep --sign - "${APP_DIR}"
+# TCC (quyền Ghi màn hình) gắn với designated requirement của chữ ký. Ký ad-hoc thì requirement
+# là cdhash, đổi sau mỗi lần build/cập nhật => quyền đã cấp mất hiệu lực dù Cài đặt vẫn hiện bật.
+# Ký bằng chứng chỉ cố định để requirement chỉ phụ thuộc bundle ID + chứng chỉ.
+SIGN_IDENTITY="${XCHUP_SIGN_IDENTITY:-$(security find-identity -v -p codesigning | awk '/"Apple Development:/ {print $2; exit}')}"
+if [[ -z "${SIGN_IDENTITY}" ]]; then
+  echo "WARNING: no stable signing identity found, falling back to ad-hoc." >&2
+  echo "         Screen Recording permission will have to be re-granted after every rebuild." >&2
+  SIGN_IDENTITY="-"
+fi
+codesign --force --deep --sign "${SIGN_IDENTITY}" "${APP_DIR}"
+codesign -dr - "${APP_DIR}" 2>&1 | grep designated
+if [[ "${SIGN_IDENTITY}" != "-" && "${PREV_ADHOC}" == 1 ]]; then
+  # Bản ghi TCC cũ gắn với cdhash ad-hoc: xoá để macOS hỏi lại theo chữ ký mới
+  tccutil reset ScreenCapture com.trinhhaox.xchup >/dev/null 2>&1 || true
+fi
 
 echo "==> 6. Registering with LaunchServices..."
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "${APP_DIR}"

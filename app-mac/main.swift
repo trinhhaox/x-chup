@@ -111,30 +111,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    var isShowingPermissionAlert = false
+
     func checkScreenCapturePermission(prompt: Bool = false) -> Bool {
         if #available(macOS 10.15, *) {
             if CGPreflightScreenCaptureAccess() {
                 return true
             }
-            if prompt {
-                CGRequestScreenCaptureAccess()
+            if prompt && !isShowingPermissionAlert {
+                isShowingPermissionAlert = true
                 DispatchQueue.main.async {
+                    // App chạy dạng accessory (LSUIElement) nên phải kích hoạt, nếu không alert bị che sau cửa sổ khác
+                    NSApp.activate(ignoringOtherApps: true)
                     let alert = NSAlert()
                     alert.messageText = "Cần cấp quyền Ghi lại màn hình cho xChup"
-                    alert.informativeText = "Để chụp ảnh màn hình, bạn cần bật quyền 'Ghi màn hình & Âm thanh hệ thống' cho xChup trong Cài đặt hệ thống.\n\nSau khi bật xong, vui lòng khởi động lại xChup để áp dụng."
+                    alert.informativeText = "Để chụp ảnh màn hình, bạn cần bật quyền 'Ghi màn hình & Âm thanh hệ thống' cho xChup trong Cài đặt hệ thống.\n\nmacOS chỉ áp dụng quyền mới sau khi xChup khởi động lại: bật xong hãy bấm \"Khởi động lại xChup\"."
                     alert.alertStyle = .warning
                     alert.addButton(withTitle: "Mở Cài đặt hệ thống")
+                    alert.addButton(withTitle: "Khởi động lại xChup")
                     alert.addButton(withTitle: "Để sau")
-                    if alert.runModal() == .alertFirstButtonReturn {
+                    let response = alert.runModal()
+                    self.isShowingPermissionAlert = false
+                    switch response {
+                    case .alertFirstButtonReturn:
+                        // Đăng ký xChup vào danh sách quyền (lần đầu macOS hiện thêm hộp thoại hệ thống) rồi mở đúng mục
+                        CGRequestScreenCaptureAccess()
                         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
                             NSWorkspace.shared.open(url)
                         }
+                    case .alertSecondButtonReturn:
+                        self.relaunchApp()
+                    default:
+                        break
                     }
                 }
             }
             return false
         }
         return true
+    }
+
+    /// Chờ tiến trình hiện tại thoát (để nhả khoá single-instance) rồi mở lại app.
+    func relaunchApp() {
+        let script = """
+        while kill -0 \(ProcessInfo.processInfo.processIdentifier) 2>/dev/null; do sleep 0.2; done
+        open "\(Bundle.main.bundlePath)" --args tray
+        """
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/sh")
+        proc.arguments = ["-c", script]
+        do {
+            try proc.run()
+            NSApp.terminate(nil)
+        } catch {
+            fputs("xChup relaunch failed: \(error)\n", stderr)
+        }
     }
 
     func runTray() {
@@ -2908,7 +2939,7 @@ final class UpdateManager {
             while kill -0 \(myPid) 2>/dev/null; do sleep 0.2; done
             rm -rf "/Applications/xChup.app"
             mv "\(newApp)" "/Applications/xChup.app"
-            codesign --force --deep --sign - "/Applications/xChup.app" 2>/dev/null || true
+            xattr -cr "/Applications/xChup.app" 2>/dev/null || true
             /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "/Applications/xChup.app"
             open "/Applications/xChup.app"
             rm -rf "\(extractedDir)" "\(updateZip)"
