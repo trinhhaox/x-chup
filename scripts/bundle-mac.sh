@@ -180,9 +180,9 @@ cat << 'PLIST_EOF' > "${CONTENTS_DIR}/Info.plist"
     <key>CFBundleIdentifier</key>
     <string>com.trinhhaox.xchup</string>
     <key>CFBundleVersion</key>
-    <string>0.1.1</string>
+    <string>0.1.2</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.1</string>
+    <string>0.1.2</string>
     <key>CFBundleExecutable</key>
     <string>xChup</string>
     <key>CFBundleIconFile</key>
@@ -207,7 +207,20 @@ echo "==> 5. Codesigning ${APP_DIR}..."
 # TCC (quyền Ghi màn hình) gắn với designated requirement của chữ ký. Ký ad-hoc thì requirement
 # là cdhash, đổi sau mỗi lần build/cập nhật => quyền đã cấp mất hiệu lực dù Cài đặt vẫn hiện bật.
 # Ký bằng chứng chỉ cố định để requirement chỉ phụ thuộc bundle ID + chứng chỉ.
-SIGN_IDENTITY="${XCHUP_SIGN_IDENTITY:-$(security find-identity -v -p codesigning | awk '/"Apple Development:/ {print $2; exit}')}"
+# Chọn chứng chỉ Apple Development cấp gần nhất: Xcode thu hồi các bản cũ khi cấp lại, nhưng Keychain
+# vẫn coi chúng là hợp lệ; app ký bằng chứng chỉ đã thu hồi bị macOS chặn là phần mềm độc hại.
+newest_dev_identity() {
+  local hash start ts best="" best_ts=0
+  for hash in $(security find-identity -v -p codesigning | awk '/"Apple Development:/ {print $2}'); do
+    start=$(security find-certificate -a -Z -p -c "Apple Development:" \
+      | awk -v h="$hash" '/SHA-1 hash/ {on = ($3 == h); next} on {print} /END CERT/ {on = 0}' \
+      | openssl x509 -noout -startdate | cut -d= -f2)
+    ts=$(date -j -f "%b %d %T %Y %Z" "${start}" +%s)
+    if (( ts > best_ts )); then best="${hash}"; best_ts="${ts}"; fi
+  done
+  echo "${best}"
+}
+SIGN_IDENTITY="${XCHUP_SIGN_IDENTITY:-$(newest_dev_identity)}"
 if [[ -z "${SIGN_IDENTITY}" ]]; then
   echo "WARNING: no stable signing identity found, falling back to ad-hoc." >&2
   echo "         Screen Recording permission will have to be re-granted after every rebuild." >&2
