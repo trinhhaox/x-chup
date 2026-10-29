@@ -556,8 +556,8 @@ final class QuickAccessController: NSObject {
             cardW = cardH * aspect
         }
 
-        let totalW = max(cardW, 200) + 16
-        let totalH = cardH + 54
+        let totalW = max(cardW, 240) + 16
+        let totalH = cardH + 60
 
         let margin: CGFloat = 20
         let originX = screen.visibleFrame.maxX - totalW - margin
@@ -631,17 +631,49 @@ final class CardView: NSView, NSDraggingSource {
         self.filePath = filePath
         super.init(frame: frame)
 
-        editButton = NSButton(title: "✏️ Sửa", target: self, action: #selector(actionAnnotate))
-        editButton.bezelStyle = .inline
-        editButton.font = NSFont.systemFont(ofSize: 10, weight: .semibold)
-        editButton.frame = NSRect(x: bounds.width - 128, y: 8, width: 56, height: 22)
+        pinButton = makeActionButton(title: "Ghim", symbol: "pin.fill", action: #selector(actionPin))
+        pinButton.frame = NSRect(x: bounds.width - 12 - 72, y: 9, width: 72, height: 26)
+        addSubview(pinButton)
+
+        editButton = makeActionButton(title: "Sửa", symbol: "pencil", action: #selector(actionAnnotate))
+        editButton.frame = NSRect(x: pinButton.frame.minX - 6 - 66, y: 9, width: 66, height: 26)
         addSubview(editButton)
 
-        pinButton = NSButton(title: "📌 Ghim", target: self, action: #selector(actionPin))
-        pinButton.bezelStyle = .inline
-        pinButton.font = NSFont.systemFont(ofSize: 10, weight: .semibold)
-        pinButton.frame = NSRect(x: bounds.width - 66, y: 8, width: 56, height: 22)
-        addSubview(pinButton)
+        // Nút đóng tròn ở góc trên bên trái ảnh xem trước
+        let closeButton = NSButton(frame: NSRect(x: 16, y: bounds.height - 16 - 24, width: 24, height: 24))
+        closeButton.isBordered = false
+        closeButton.title = ""
+        closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Đóng")?
+            .withSymbolConfiguration(.init(pointSize: 10, weight: .bold))
+        closeButton.contentTintColor = .white
+        closeButton.wantsLayer = true
+        closeButton.layer?.cornerRadius = 12
+        closeButton.layer?.backgroundColor = NSColor(calibratedWhite: 0, alpha: 0.65).cgColor
+        closeButton.layer?.borderWidth = 1
+        closeButton.layer?.borderColor = NSColor(calibratedWhite: 1, alpha: 0.35).cgColor
+        closeButton.toolTip = "Đóng"
+        closeButton.target = self
+        closeButton.action = #selector(actionClose)
+        addSubview(closeButton)
+    }
+
+    private func makeActionButton(title: String, symbol: String, action: Selector) -> NSButton {
+        let button = NSButton(title: "", target: self, action: action)
+        button.isBordered = false
+        button.attributedTitle = NSAttributedString(string: " " + title, attributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+            .foregroundColor: NSColor.white
+        ])
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)?
+            .withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
+        button.imagePosition = .imageLeading
+        button.contentTintColor = .white
+        button.wantsLayer = true
+        button.layer?.cornerRadius = 7
+        button.layer?.backgroundColor = NSColor(calibratedWhite: 1, alpha: 0.18).cgColor
+        button.layer?.borderWidth = 1
+        button.layer?.borderColor = NSColor(calibratedWhite: 1, alpha: 0.25).cgColor
+        return button
     }
 
     required init?(coder: NSCoder) {
@@ -656,30 +688,36 @@ final class CardView: NSView, NSDraggingSource {
         QuickAccessController.shared.openPin()
     }
 
+    @objc private func actionClose() {
+        QuickAccessController.shared.dismiss()
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
 
         // Glass background card
         let bgPath = NSBezierPath(roundedRect: bounds.insetBy(dx: 4, dy: 4), xRadius: 12, yRadius: 12)
-        NSColor(calibratedWhite: 0.15, alpha: 0.90).setFill()
+        NSColor(calibratedWhite: 0.11, alpha: 0.96).setFill()
         bgPath.fill()
-        NSColor(calibratedWhite: 0.35, alpha: 0.50).setStroke()
+        NSColor(calibratedWhite: 1.0, alpha: 0.18).setStroke()
         bgPath.lineWidth = 1.0
         bgPath.stroke()
 
-        // Draw image thumbnail
-        let imgRect = NSRect(x: 10, y: 38, width: bounds.width - 20, height: bounds.height - 48)
-        let imgPath = NSBezierPath(roundedRect: imgRect, xRadius: 8, yRadius: 8)
-        imgPath.addClip()
+        // Draw image thumbnail (clip chỉ cho ảnh, nếu không chữ bên dưới bị cắt mất)
+        let imgRect = NSRect(x: 10, y: 44, width: bounds.width - 20, height: bounds.height - 54)
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(roundedRect: imgRect, xRadius: 8, yRadius: 8).addClip()
         image.draw(in: imgRect, from: .zero, operation: .sourceOver, fraction: 1.0)
+        NSGraphicsContext.restoreGraphicsState()
 
         // Actions bar at bottom
         let titleAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 10, weight: .medium),
-            .foregroundColor: NSColor(calibratedWhite: 0.75, alpha: 1.0)
+            .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+            .foregroundColor: NSColor(calibratedRed: 0.45, green: 0.88, blue: 0.55, alpha: 1.0)
         ]
-        let info = "✓ Đã copy"
-        (info as NSString).draw(at: NSPoint(x: 14, y: 12), withAttributes: titleAttrs)
+        let info = "✓ Đã copy" as NSString
+        let infoSize = info.size(withAttributes: titleAttrs)
+        info.draw(at: NSPoint(x: 16, y: 9 + (26 - infoSize.height) / 2), withAttributes: titleAttrs)
     }
 
     override func mouseDown(with event: NSEvent) {
