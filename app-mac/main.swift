@@ -266,11 +266,20 @@ final class OverlayController {
     private var windows: [NSWindow] = []
     private var outputPath: String?
     private var completion: ((String, NSRect) -> Void)?
+    private var watchdog: DispatchWorkItem?
 
     func show(outputPath: String? = nil, completion: ((String, NSRect) -> Void)? = nil) {
+        // Bấm phím tắt lần nữa khi overlay đang mở sẽ ghi đè `windows` và bỏ rơi
+        // các overlay cũ ở level .screenSaver: chúng phủ kín mọi màn hình, không
+        // còn ai đóng được, kể cả hộp Force Quit -> phải khởi động lại máy.
+        guard windows.isEmpty else { return }
         self.outputPath = outputPath
         self.completion = completion
-        NSApp.activate(ignoringOtherApps: true)
+        if #available(macOS 14.0, *) {
+            NSApp.activate()
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+        }
 
         windows = NSScreen.screens.map { screen in
             let window = OverlayWindow(
@@ -290,12 +299,25 @@ final class OverlayController {
             let overlayView = OverlayView(frame: NSRect(origin: .zero, size: screen.frame.size), screenFrame: screen.frame)
             window.contentView = overlayView
             window.makeKeyAndOrderFront(nil)
+            window.makeFirstResponder(overlayView)
             window.orderFrontRegardless()
             return window
         }
+
+        // Lưới an toàn: nếu overlay không nhận được phím/chuột (app không được
+        // kích hoạt), tự huỷ sau 60 giây thay vì khoá màn hình vĩnh viễn.
+        let item = DispatchWorkItem { [weak self] in
+            guard let self = self, !self.windows.isEmpty else { return }
+            self.finish(rect: nil)
+        }
+        watchdog = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 60, execute: item)
     }
 
     func finish(rect: NSRect?) {
+        guard !windows.isEmpty else { return }
+        watchdog?.cancel()
+        watchdog = nil
         for window in windows {
             window.orderOut(nil)
         }
@@ -376,6 +398,10 @@ final class OverlayView: NSView {
 
     override var acceptsFirstResponder: Bool { true }
 
+    // Overlay mở khi app chưa active: không có dòng này, cú click đầu tiên chỉ
+    // dùng để kích hoạt app và bị nuốt mất.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: .crosshair)
     }
@@ -395,6 +421,10 @@ final class OverlayView: NSView {
         } else {
             super.keyDown(with: event)
         }
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        OverlayController.shared.finish(rect: nil)
     }
 
     override func mouseDown(with event: NSEvent) {
