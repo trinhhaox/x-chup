@@ -689,7 +689,9 @@ final class CardView: NSView, NSDraggingSource {
     }
 
     @objc private func actionClose() {
-        QuickAccessController.shared.dismiss()
+        // Gọi thẳng trong action của nút thì animation mờ dần không bao giờ chạy
+        // completion, thẻ đứng yên: đẩy sang vòng run loop sau.
+        DispatchQueue.main.async { QuickAccessController.shared.dismiss() }
     }
 
     override func draw(_ dirtyRect: NSRect) {
