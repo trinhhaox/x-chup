@@ -1260,7 +1260,7 @@ final class AnnotationWindowController: NSWindowController {
 
         let undoBtn = NSButton(title: "↶", target: self, action: #selector(actionUndo))
         undoBtn.bezelStyle = .rounded
-        undoBtn.toolTip = "Hoàn tác (⌘Z)"
+        undoBtn.toolTip = "Hoàn tác"
         undoBtn.translatesAutoresizingMaskIntoConstraints = false
         toolbarView.addSubview(undoBtn)
 
@@ -3052,7 +3052,7 @@ final class TrayController: NSObject, NSMenuDelegate {
         guard let button = statusItem?.button else { return }
 
         button.image = createMenuBarIcon()
-        button.toolTip = "xChup - CleanShot X for Mac"
+        button.toolTip = "xChup – chụp màn hình cho Mac"
         button.imagePosition = .imageLeft
 
         buildMenu()
@@ -3085,14 +3085,14 @@ final class TrayController: NSObject, NSMenuDelegate {
         } else {
             button.image = createMenuBarIcon()
             button.title = ""
-            button.toolTip = "xChup - CleanShot X for Mac"
+            button.toolTip = "xChup – chụp màn hình cho Mac"
         }
     }
 
     func buildMenu() {
         menu.removeAllItems()
 
-        let titleItem = NSMenuItem(title: "xChup • CleanShot X", action: nil, keyEquivalent: "")
+        let titleItem = NSMenuItem(title: "xChup", action: nil, keyEquivalent: "")
         titleItem.isEnabled = false
         menu.addItem(titleItem)
         menu.addItem(NSMenuItem.separator())
@@ -3209,14 +3209,7 @@ final class TrayController: NSObject, NSMenuDelegate {
 
     private func updateRecentMenu() {
         recentMenu.removeAllItems()
-        let capturesDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/share/snip/captures")
-
-        guard let files = try? FileManager.default.contentsOfDirectory(
-            at: capturesDir,
-            includingPropertiesForKeys: [.contentModificationDateKey],
-            options: .skipsHiddenFiles
-        ) else {
+        guard let files = CaptureFolders.files() else {
             let empty = NSMenuItem(title: "Chưa có ảnh chụp nào", action: nil, keyEquivalent: "")
             empty.isEnabled = false
             recentMenu.addItem(empty)
@@ -3273,7 +3266,7 @@ final class TrayController: NSObject, NSMenuDelegate {
         if let del = NSApp.delegate as? AppDelegate, !del.checkScreenCapturePermission(prompt: true) {
             return
         }
-        let saveDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Pictures/Screenshots")
+        let saveDir = CaptureFolders.screenshots
         try? FileManager.default.createDirectory(at: saveDir, withIntermediateDirectories: true)
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd-HHmmss"
@@ -3295,7 +3288,7 @@ final class TrayController: NSObject, NSMenuDelegate {
         if let del = NSApp.delegate as? AppDelegate, !del.checkScreenCapturePermission(prompt: true) {
             return
         }
-        let saveDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Pictures/Screenshots")
+        let saveDir = CaptureFolders.screenshots
         try? FileManager.default.createDirectory(at: saveDir, withIntermediateDirectories: true)
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd-HHmmss"
@@ -3339,13 +3332,7 @@ final class TrayController: NSObject, NSMenuDelegate {
     }
 
     @objc func actionPin() {
-        let capturesDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/share/snip/captures")
-        if let files = try? FileManager.default.contentsOfDirectory(
-            at: capturesDir,
-            includingPropertiesForKeys: [.contentModificationDateKey],
-            options: .skipsHiddenFiles
-        ) {
+                if let files = CaptureFolders.files()?.filter({ CaptureFolders.imageExtensions.contains($0.pathExtension.lowercased()) }) {
             let sorted = files.sorted { f1, f2 in
                 let d1 = (try? f1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date.distantPast
                 let d2 = (try? f2.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date.distantPast
@@ -3395,7 +3382,7 @@ final class TrayController: NSObject, NSMenuDelegate {
 
         showNotification(
             title: "xChup - Bắt đầu quay màn hình",
-            text: "Nhấp vào icon Menu Bar hoặc bấm ⌘⇧7 để dừng quay."
+            text: "Nhấp vào icon Menu Bar hoặc bấm \(ShortcutSettings.load().record.displayString) để dừng quay."
         )
     }
 
@@ -3424,10 +3411,7 @@ final class TrayController: NSObject, NSMenuDelegate {
     }
 
     @objc func actionConvertRecentVideoToGif() {
-        let capturesDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/share/snip/captures")
-        let fileManager = FileManager.default
-        guard let files = try? fileManager.contentsOfDirectory(at: capturesDir, includingPropertiesForKeys: [.contentModificationDateKey], options: .skipsHiddenFiles) else {
+        guard let files = CaptureFolders.files() else {
             showNotification(title: "xChup", text: "Chưa có video nào trong thư mục lưu trữ.")
             return
         }
@@ -3448,10 +3432,7 @@ final class TrayController: NSObject, NSMenuDelegate {
     }
 
     @objc func actionAnnotateRecent() {
-        let capturesDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/share/snip/captures")
-        let fileManager = FileManager.default
-        guard let files = try? fileManager.contentsOfDirectory(at: capturesDir, includingPropertiesForKeys: [.contentModificationDateKey], options: .skipsHiddenFiles) else {
+        guard let files = CaptureFolders.files() else {
             showNotification(title: "xChup", text: "Chưa có ảnh chụp nào trong thư mục lưu trữ.")
             return
         }
@@ -3472,10 +3453,8 @@ final class TrayController: NSObject, NSMenuDelegate {
     }
 
     @objc func actionOpenFolder() {
-        let capturesDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/share/snip/captures")
-        try? FileManager.default.createDirectory(at: capturesDir, withIntermediateDirectories: true)
-        NSWorkspace.shared.open(capturesDir)
+        try? FileManager.default.createDirectory(at: CaptureFolders.screenshots, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(CaptureFolders.screenshots)
     }
 
     @objc func actionToggleDesktop() {
@@ -3497,7 +3476,7 @@ final class TrayController: NSObject, NSMenuDelegate {
         let settings = ShortcutSettings.load()
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
-        alert.messageText = "xChup - CleanShot X for Mac"
+        alert.messageText = "xChup – chụp màn hình cho Mac"
         alert.informativeText = """
         Phím tắt toàn cầu (Global Shortcuts):
         • \(settings.area.displayString): Chụp vùng màn hình (Area Capture)
@@ -3514,7 +3493,7 @@ final class TrayController: NSObject, NSMenuDelegate {
         Bộ công cụ chú thích ảnh tức thì (Instant Annotation):
         • Quick Card sau khi chụp: Bấm '✏️ Sửa' hoặc nhấp đúp thumbnail để mở Editor.
         • Công cụ vẽ: Mũi tên (Arrow), Khung (Box), Làm mờ bảo mật (Blur Pixelate), Đánh số thứ tự tự tăng ① ② ③ (Step Counter), Bút vẽ tự do (Pen) & Chữ (Text).
-        • Phím tắt Editor: ⌘Z (Undo), ⇧⌘Z (Redo), ⌘C (Sao chép), ⌘S (Lưu đè).
+        • Trong trình chú thích: bấm Return để lưu.
 
         Tính năng nâng cao:
         • Quick Access Card: Kéo thả file trực tiếp vào Telegram, Slack, VSCode.
@@ -3561,3 +3540,20 @@ let delegate = AppDelegate()
 app.delegate = delegate
 app.run()
 
+
+
+/// Where captures live: screenshots in ~/Pictures/Screenshots, recordings and GIFs in the snip data folder.
+/// Menus that list "recent" captures read both so new screenshots show up too.
+enum CaptureFolders {
+    static let screenshots = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Pictures/Screenshots")
+    static let recordings = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/share/snip/captures")
+    static let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "webp"]
+
+    /// Files from both folders, or nil when neither folder exists yet.
+    static func files() -> [URL]? {
+        let found = [screenshots, recordings].compactMap {
+            try? FileManager.default.contentsOfDirectory(at: $0, includingPropertiesForKeys: [.contentModificationDateKey], options: .skipsHiddenFiles)
+        }
+        return found.isEmpty ? nil : found.flatMap { $0 }
+    }
+}
