@@ -226,7 +226,19 @@ if [[ -z "${SIGN_IDENTITY}" ]]; then
   echo "         Screen Recording permission will have to be re-granted after every rebuild." >&2
   SIGN_IDENTITY="-"
 fi
-codesign --force --deep --sign "${SIGN_IDENTITY}" "${APP_DIR}"
+# XCHUP_NOTARIZE_TEAM=<team id>: bật hardened runtime rồi ký lại bằng Developer ID trên đám mây và
+# notarize qua tài khoản Xcode, để Gatekeeper trên máy người khác mở được app tải từ web.
+NOTARIZE_TEAM="${XCHUP_NOTARIZE_TEAM:-}"
+if [[ -n "${NOTARIZE_TEAM}" && "${SIGN_IDENTITY}" == "-" ]]; then
+  echo "XCHUP_NOTARIZE_TEAM cần một chứng chỉ ký thật, không dùng ad-hoc." >&2
+  exit 1
+fi
+if [[ -n "${NOTARIZE_TEAM}" ]]; then
+  codesign --force --deep --options runtime --timestamp --sign "${SIGN_IDENTITY}" "${APP_DIR}"
+  ./scripts/notarize-with-xcode.sh "${APP_DIR}" "${NOTARIZE_TEAM}"
+else
+  codesign --force --deep --sign "${SIGN_IDENTITY}" "${APP_DIR}"
+fi
 codesign -dr - "${APP_DIR}" 2>&1 | grep designated
 if [[ "${SIGN_IDENTITY}" != "-" && "${PREV_ADHOC}" == 1 ]]; then
   # Bản ghi TCC cũ gắn với cdhash ad-hoc: xoá để macOS hỏi lại theo chữ ký mới
