@@ -3313,7 +3313,12 @@ final class TrayController: NSObject, NSMenuDelegate {
         folderItem.target = self
         menu.addItem(folderItem)
 
-        let cleanDesktopItem = NSMenuItem(title: "Ẩn / Hiện icon Desktop", action: #selector(actionToggleDesktop), keyEquivalent: "")
+        let isHidden = isDesktopHidden()
+        let cleanDesktopItem = NSMenuItem(
+            title: isHidden ? "👁 Hiện icon Desktop" : "🧹 Ẩn icon Desktop (Clean Desktop)",
+            action: #selector(actionToggleDesktop),
+            keyEquivalent: ""
+        )
         cleanDesktopItem.target = self
         menu.addItem(cleanDesktopItem)
 
@@ -3659,19 +3664,44 @@ final class TrayController: NSObject, NSMenuDelegate {
         NSWorkspace.shared.open(CaptureFolders.screenshots)
     }
 
-    @objc func actionToggleDesktop() {
+    func isDesktopHidden() -> Bool {
         let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/sh")
-        task.arguments = ["-c", """
-            VAL=$(defaults read com.apple.finder CreateDesktop 2>/dev/null || echo "true")
-            if [ "$VAL" = "false" ]; then
-                defaults write com.apple.finder CreateDesktop -bool true
-            else
-                defaults write com.apple.finder CreateDesktop -bool false
-            fi
-            killall Finder
-        """]
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
+        task.arguments = ["read", "com.apple.finder", "CreateDesktop"]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = Pipe()
         try? task.run()
+        task.waitUntilExit()
+        if task.terminationStatus == 0 {
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let str = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return str == "0" || str.lowercased() == "false"
+        }
+        return false
+    }
+
+    @objc func actionToggleDesktop() {
+        let currentlyHidden = isDesktopHidden()
+        let newHide = !currentlyHidden
+
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
+        task.arguments = ["write", "com.apple.finder", "CreateDesktop", "-bool", newHide ? "false" : "true"]
+        try? task.run()
+        task.waitUntilExit()
+
+        let killTask = Process()
+        killTask.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+        killTask.arguments = ["Finder"]
+        try? killTask.run()
+        killTask.waitUntilExit()
+
+        showNotification(
+            title: "xChup Desktop",
+            text: newHide ? "Đã ẩn các icon trên màn hình nền." : "Đã hiển thị lại các icon trên màn hình nền."
+        )
+        buildMenu()
     }
 
     @objc func actionShowGuide() {
