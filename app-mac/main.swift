@@ -254,6 +254,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+// MARK: - Helper Functions
+
+typealias CGWindowListCreateImageFunc = @convention(c) (
+    CGRect, UInt32, UInt32, UInt32
+) -> Unmanaged<CGImage>?
+
+private let cgWindowListCreateImageFn: CGWindowListCreateImageFunc? = {
+    guard let handle = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_NOW),
+          let sym = dlsym(handle, "CGWindowListCreateImage") else {
+        return nil
+    }
+    return unsafeBitCast(sym, to: CGWindowListCreateImageFunc.self)
+}()
+
+/// Chụp đóng băng toàn bộ các màn hình tức thì bằng CoreGraphics (chỉ mất ~50ms).
+/// Giúp giữ nguyên vẹn 100% pop-up menu bar, context menu, tooltip của các phần mềm khác.
+func captureAllScreensFast() -> [Int: CGImage] {
+    let screens = NSScreen.screens
+    guard !screens.isEmpty else { return [:] }
+
+    var results: [Int: CGImage] = [:]
+    if let fn = cgWindowListCreateImageFn {
+        let primaryHeight = screens.first?.frame.height ?? 0
+        for (i, screen) in screens.enumerated() {
+            let quartzY = primaryHeight - (screen.frame.origin.y + screen.frame.height)
+            let quartzRect = CGRect(
+                x: screen.frame.origin.x,
+                y: quartzY,
+                width: screen.frame.width,
+                height: screen.frame.height
+            )
+            // kCGWindowListOptionOnScreenOnly = 1, kCGWindowImageBestResolution = 1
+            if let cgImage = fn(quartzRect, 1, 0, 1)?.takeRetainedValue() {
+                results[i] = cgImage
+            }
+        }
+    }
+
+    if !results.isEmpty {
+        return results
+    }
+
+    // Fallback: dùng screencapture CLI nếu dlsym CoreGraphics không khả dụng
+    let tempDir = NSTemporaryDirectory()
+    let pid = ProcessInfo.processInfo.processIdentifier
+    var tempPaths: [String] = []
+    for i in 0..<screens.count {
+        tempPaths.append((tempDir as NSString).appendingPathComponent("xchup_freeze_\(pid)_\(i).png"))
+    }
+
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+    task.arguments = ["-x"] + tempPaths
+    do {
+        try task.run()
+        task.waitUntilExit()
+    } catch {
+        fputs("Failed to run screencapture for freeze: \(error)\n", stderr)
+    }
+
+    for (i, path) in tempPaths.enumerated() {
+        if FileManager.default.fileExists(atPath: path),
+           let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+           let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) {
+            results[i] = cgImage
+        }
+        try? FileManager.default.removeItem(atPath: path)
+    }
+    return results
+}
+
+func saveCGImageAsPNG(_ image: CGImage, to path: String) -> Bool {
+    let url = URL(fileURLWithPath: path)
+    guard let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) else {
+        return false
+    }
+    CGImageDestinationAddImage(dest, image, nil)
+    return CGImageDestinationFinalize(dest)
+}
+
 // MARK: - Selection Overlay
 
 final class OverlayWindow: NSWindow {
@@ -268,20 +348,24 @@ final class OverlayController {
     private var completion: ((String, NSRect) -> Void)?
     private var watchdog: DispatchWorkItem?
 
-    func show(outputPath: String? = nil, completion: ((String, NSRect) -> Void)? = nil) {
+    func show(outputPath: String? = nil, preCapturedImages: [Int: CGImage]? = nil, completion: ((String, NSRect) -> Void)? = nil) {
         // Bấm phím tắt lần nữa khi overlay đang mở sẽ ghi đè `windows` và bỏ rơi
         // các overlay cũ ở level .screenSaver: chúng phủ kín mọi màn hình, không
         // còn ai đóng được, kể cả hộp Force Quit -> phải khởi động lại máy.
         guard windows.isEmpty else { return }
         self.outputPath = outputPath
         self.completion = completion
+
+        // QUAN TRỌNG: Sử dụng ảnh đóng băng đã chụp trước đó (ngay khi bấm hotkey), hoặc chụp nhanh ngay bây giờ!
+        let frozenImages = preCapturedImages ?? captureAllScreensFast()
+
         if #available(macOS 14.0, *) {
             NSApp.activate()
         } else {
             NSApp.activate(ignoringOtherApps: true)
         }
 
-        windows = NSScreen.screens.map { screen in
+        windows = NSScreen.screens.enumerated().map { (index, screen) in
             let window = OverlayWindow(
                 contentRect: screen.frame,
                 styleMask: [.borderless],
@@ -296,7 +380,8 @@ final class OverlayController {
             window.ignoresMouseEvents = false
             window.acceptsMouseMovedEvents = true
 
-            let overlayView = OverlayView(frame: NSRect(origin: .zero, size: screen.frame.size), screenFrame: screen.frame)
+            let screenImage = frozenImages[index]
+            let overlayView = OverlayView(frame: NSRect(origin: .zero, size: screen.frame.size), screenFrame: screen.frame, screenImage: screenImage)
             window.contentView = overlayView
             window.makeKeyAndOrderFront(nil)
             window.makeFirstResponder(overlayView)
@@ -314,7 +399,7 @@ final class OverlayController {
         DispatchQueue.main.asyncAfter(deadline: .now() + 60, execute: item)
     }
 
-    func finish(rect: NSRect?) {
+    func finish(rect: NSRect?, croppedImage: CGImage? = nil) {
         guard !windows.isEmpty else { return }
         watchdog?.cancel()
         watchdog = nil
@@ -322,9 +407,6 @@ final class OverlayController {
             window.orderOut(nil)
         }
         windows.removeAll()
-
-        // Đợi 60ms để WindowServer dọn sạch frame overlay khỏi màn hình
-        usleep(60_000)
 
         guard let r = rect, r.width > 2 && r.height > 2 else {
             if completion != nil {
@@ -340,17 +422,28 @@ final class OverlayController {
             }
         }
 
-        // Chụp màn hình bằng screencapture từ ngữ cảnh của ứng dụng macOS
+        // Lưu ảnh chụp
         if let outPath = outputPath {
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-            let rArg = "-R\(Int(r.origin.x)),\(Int(r.origin.y)),\(Int(r.width)),\(Int(r.height))"
-            task.arguments = ["-x", rArg, outPath]
-            try? task.run()
-            task.waitUntilExit()
+            var saveSuccess = false
+            if let cropped = croppedImage {
+                saveSuccess = saveCGImageAsPNG(cropped, to: outPath)
+            }
 
-            if task.terminationStatus != 0 {
-                fputs("screencapture failed with status \(task.terminationStatus)\n", stderr)
+            // Fallback: Nếu không crop được từ ảnh freeze thì dùng screencapture như cũ
+            if !saveSuccess {
+                // Đợi 60ms để WindowServer dọn sạch frame overlay khỏi màn hình
+                usleep(60_000)
+                let task = Process()
+                task.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                let rArg = "-R\(Int(r.origin.x)),\(Int(r.origin.y)),\(Int(r.width)),\(Int(r.height))"
+                task.arguments = ["-x", rArg, outPath]
+                try? task.run()
+                task.waitUntilExit()
+                saveSuccess = (task.terminationStatus == 0)
+            }
+
+            if !saveSuccess {
+                fputs("screencapture failed\n", stderr)
                 showNotification(title: "xChup Lỗi", text: "Không thể chụp màn hình. Vui lòng cấp quyền Ghi màn hình trong Cài đặt hệ thống.")
                 if completion == nil && isStandaloneMode {
                     exit(1)
@@ -383,12 +476,14 @@ final class OverlayController {
 
 final class OverlayView: NSView {
     private let screenFrame: NSRect
+    private let screenImage: CGImage?
     private var startPoint: NSPoint?
     private var currentPoint: NSPoint?
     private var isDragging = false
 
-    init(frame: NSRect, screenFrame: NSRect) {
+    init(frame: NSRect, screenFrame: NSRect, screenImage: CGImage? = nil) {
         self.screenFrame = screenFrame
+        self.screenImage = screenImage
         super.init(frame: frame)
     }
 
@@ -454,7 +549,20 @@ final class OverlayView: NSView {
         let quartzX = screenFrame.origin.x + x
         let finalRect = NSRect(x: quartzX, y: quartzY, width: w, height: h)
 
-        OverlayController.shared.finish(rect: finalRect)
+        var croppedImage: CGImage? = nil
+        if let screenImage = screenImage, w > 2 && h > 2 {
+            let scale = CGFloat(screenImage.width) / bounds.width
+            let topY = bounds.height - (y + h)
+            let pixelRect = CGRect(
+                x: x * scale,
+                y: topY * scale,
+                width: w * scale,
+                height: h * scale
+            )
+            croppedImage = screenImage.cropping(to: pixelRect)
+        }
+
+        OverlayController.shared.finish(rect: finalRect, croppedImage: croppedImage)
     }
 
     override func mouseMoved(with event: NSEvent) {
@@ -467,39 +575,84 @@ final class OverlayView: NSView {
 
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
 
-        // Dim background
-        ctx.setFillColor(NSColor(calibratedWhite: 0, alpha: 0.25).cgColor)
-        ctx.fill(bounds)
+        if let screenImage = screenImage {
+            // 1. Vẽ toàn bộ ảnh màn hình đã đóng băng (giữ nguyên pop up thanh menu bar)
+            let img = NSImage(cgImage: screenImage, size: bounds.size)
+            img.draw(in: bounds)
 
-        // Selection rectangle
-        if let start = startPoint, let curr = currentPoint, isDragging {
-            let x = min(start.x, curr.x)
-            let y = min(start.y, curr.y)
-            let w = abs(curr.x - start.x)
-            let h = abs(curr.y - start.y)
-            let selRect = NSRect(x: x, y: y, width: w, height: h)
+            if let start = startPoint, let curr = currentPoint, isDragging {
+                let x = min(start.x, curr.x)
+                let y = min(start.y, curr.y)
+                let w = abs(curr.x - start.x)
+                let h = abs(curr.y - start.y)
+                let selRect = NSRect(x: x, y: y, width: w, height: h)
 
-            // Clear selected area to reveal screen underneath
-            ctx.setBlendMode(.clear)
-            ctx.fill(selRect)
-            ctx.setBlendMode(.normal)
+                // 2. Phủ bóng mờ 25% lên phần màn hình bên ngoài vùng chọn (Even-Odd)
+                let dimPath = NSBezierPath(rect: bounds)
+                dimPath.appendRect(selRect)
+                dimPath.windingRule = .evenOdd
+                NSColor(calibratedWhite: 0, alpha: 0.25).setFill()
+                dimPath.fill()
 
-            // White border
-            ctx.setStrokeColor(NSColor.white.cgColor)
-            ctx.setLineWidth(1.5)
-            ctx.stroke(selRect)
+                // 3. Viền trắng xung quanh vùng chọn
+                let borderPath = NSBezierPath(rect: selRect)
+                borderPath.lineWidth = 1.5
+                NSColor.white.setStroke()
+                borderPath.stroke()
 
-            // Size badge
-            let sizeText = "\(Int(w)) × \(Int(h))"
-            drawPillBadge(text: sizeText, at: NSPoint(x: selRect.midX, y: max(selRect.minY - 26, 10)))
-        } else if let curr = currentPoint {
-            // Draw crosshairs
-            ctx.setStrokeColor(NSColor(calibratedWhite: 1.0, alpha: 0.6).cgColor)
-            ctx.setLineWidth(1.0)
-            ctx.strokeLineSegments(between: [
-                CGPoint(x: curr.x, y: 0), CGPoint(x: curr.x, y: bounds.height),
-                CGPoint(x: 0, y: curr.y), CGPoint(x: bounds.width, y: curr.y)
-            ])
+                // 4. Kích thước badge
+                let sizeText = "\(Int(w)) × \(Int(h))"
+                drawPillBadge(text: sizeText, at: NSPoint(x: selRect.midX, y: max(selRect.minY - 26, 10)))
+            } else {
+                // Toàn màn hình bị mờ nhẹ khi chưa kéo chuột
+                ctx.setFillColor(NSColor(calibratedWhite: 0, alpha: 0.25).cgColor)
+                ctx.fill(bounds)
+
+                // Vẽ thước ngắm crosshairs
+                if let curr = currentPoint {
+                    ctx.setStrokeColor(NSColor(calibratedWhite: 1.0, alpha: 0.6).cgColor)
+                    ctx.setLineWidth(1.0)
+                    ctx.strokeLineSegments(between: [
+                        CGPoint(x: curr.x, y: 0), CGPoint(x: curr.x, y: bounds.height),
+                        CGPoint(x: 0, y: curr.y), CGPoint(x: bounds.width, y: curr.y)
+                    ])
+                }
+            }
+        } else {
+            // Fallback (kính trong suốt) nếu không có screenImage
+            ctx.setFillColor(NSColor(calibratedWhite: 0, alpha: 0.25).cgColor)
+            ctx.fill(bounds)
+
+            // Selection rectangle
+            if let start = startPoint, let curr = currentPoint, isDragging {
+                let x = min(start.x, curr.x)
+                let y = min(start.y, curr.y)
+                let w = abs(curr.x - start.x)
+                let h = abs(curr.y - start.y)
+                let selRect = NSRect(x: x, y: y, width: w, height: h)
+
+                // Clear selected area to reveal screen underneath
+                ctx.setBlendMode(.clear)
+                ctx.fill(selRect)
+                ctx.setBlendMode(.normal)
+
+                // White border
+                ctx.setStrokeColor(NSColor.white.cgColor)
+                ctx.setLineWidth(1.5)
+                ctx.stroke(selRect)
+
+                // Size badge
+                let sizeText = "\(Int(w)) × \(Int(h))"
+                drawPillBadge(text: sizeText, at: NSPoint(x: selRect.midX, y: max(selRect.minY - 26, 10)))
+            } else if let curr = currentPoint {
+                // Draw crosshairs
+                ctx.setStrokeColor(NSColor(calibratedWhite: 1.0, alpha: 0.6).cgColor)
+                ctx.setLineWidth(1.0)
+                ctx.strokeLineSegments(between: [
+                    CGPoint(x: curr.x, y: 0), CGPoint(x: curr.x, y: bounds.height),
+                    CGPoint(x: 0, y: curr.y), CGPoint(x: bounds.width, y: curr.y)
+                ])
+            }
         }
     }
 
@@ -2654,7 +2807,7 @@ final class HotKeyManager {
         case color = 6
     }
 
-    var onHotKey: ((Action) -> Void)?
+    var onHotKey: ((Action, [Int: CGImage]?) -> Void)?
 
     func setup() {
         var eventType = EventTypeSpec(
@@ -2677,8 +2830,13 @@ final class HotKeyManager {
             if status == noErr {
                 let manager = Unmanaged<HotKeyManager>.fromOpaque(userData).takeUnretainedValue()
                 if let action = Action(rawValue: hotKeyID.id) {
+                    var capturedImages: [Int: CGImage]? = nil
+                    // CHỤP NGAY ĐỒNG BỘ TRONG EVENT HANDLER KHI POPUP VẪN CÒN ĐANG TRÊN MÀN HÌNH!
+                    if action == .area || action == .fullscreen || action == .ocr {
+                        capturedImages = captureAllScreensFast()
+                    }
                     DispatchQueue.main.async {
-                        manager.onHotKey?(action)
+                        manager.onHotKey?(action, capturedImages)
                     }
                 }
             }
@@ -2686,7 +2844,7 @@ final class HotKeyManager {
         }
 
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-        InstallEventHandler(GetApplicationEventTarget(), handler, 1, &eventType, selfPtr, &handlerRef)
+        InstallEventHandler(GetEventDispatcherTarget(), handler, 1, &eventType, selfPtr, &handlerRef)
 
         reload()
     }
@@ -2732,7 +2890,7 @@ final class HotKeyManager {
     private func registerKey(keyCode: Int, modifiers: UInt32, id: Action) {
         var ref: EventHotKeyRef?
         let hotKeyID = EventHotKeyID(signature: 0x534E4950, id: id.rawValue)
-        let err = RegisterEventHotKey(UInt32(keyCode), modifiers, hotKeyID, GetApplicationEventTarget(), 0, &ref)
+        let err = RegisterEventHotKey(UInt32(keyCode), modifiers, hotKeyID, GetEventDispatcherTarget(), 0, &ref)
         if err == noErr, let r = ref {
             hotKeyRefs.append(r)
         }
@@ -3060,8 +3218,8 @@ final class TrayController: NSObject, NSMenuDelegate {
         menu.delegate = self
 
         // Setup Global HotKeys
-        HotKeyManager.shared.onHotKey = { [weak self] action in
-            self?.handleHotKey(action)
+        HotKeyManager.shared.onHotKey = { [weak self] action, images in
+            self?.handleHotKey(action, images: images)
         }
         HotKeyManager.shared.setup()
 
@@ -3103,6 +3261,10 @@ final class TrayController: NSObject, NSMenuDelegate {
         areaItem.keyEquivalentModifierMask = nsModifierFlags(from: settings.area.modifiers)
         areaItem.target = self
         menu.addItem(areaItem)
+
+        let delayItem = NSMenuItem(title: "⏱ Chụp sau 3 giây (Delay 3s)...", action: #selector(actionAreaDelayed), keyEquivalent: "")
+        delayItem.target = self
+        menu.addItem(delayItem)
 
         let fullItem = NSMenuItem(title: "Chụp toàn màn hình (Fullscreen)", action: #selector(actionFullscreen), keyEquivalent: keyEquivalentString(settings.fullscreen))
         fullItem.keyEquivalentModifierMask = nsModifierFlags(from: settings.fullscreen.modifiers)
@@ -3262,7 +3424,7 @@ final class TrayController: NSObject, NSMenuDelegate {
         }
     }
 
-    @objc func actionArea() {
+    func startAreaCapture(delay: Double = 0.0, preCapturedImages: [Int: CGImage]? = nil) {
         if let del = NSApp.delegate as? AppDelegate, !del.checkScreenCapturePermission(prompt: true) {
             return
         }
@@ -3273,18 +3435,32 @@ final class TrayController: NSObject, NSMenuDelegate {
         let filename = "Capture-\(formatter.string(from: Date())).png"
         let filePath = saveDir.appendingPathComponent(filename).path
 
-        // Chờ 150ms để NSMenu đóng mượt mà trước khi mở Overlay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-            OverlayController.shared.show(outputPath: filePath) { path, rect in
+        let execute = { [weak self] in
+            OverlayController.shared.show(outputPath: filePath, preCapturedImages: preCapturedImages) { path, rect in
                 self?.copyImageToClipboard(filePath: path)
                 DispatchQueue.main.async {
                     QuickAccessController.shared.show(imagePath: path)
                 }
             }
         }
+
+        if delay > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: execute)
+        } else {
+            execute()
+        }
     }
 
-    @objc func actionFullscreen() {
+    @objc func actionArea() {
+        startAreaCapture(delay: 0.15)
+    }
+
+    @objc func actionAreaDelayed() {
+        showNotification(title: "xChup Hẹn Giờ", text: "Sẽ chụp sau 3 giây. Hãy mở pop-up thanh menu bar hoặc menu cần chụp...")
+        startAreaCapture(delay: 3.0)
+    }
+
+    func startFullscreenCapture(delay: Double = 0.0, preCapturedImages: [Int: CGImage]? = nil) {
         if let del = NSApp.delegate as? AppDelegate, !del.checkScreenCapturePermission(prompt: true) {
             return
         }
@@ -3295,15 +3471,21 @@ final class TrayController: NSObject, NSMenuDelegate {
         let filename = "Capture-\(formatter.string(from: Date())).png"
         let filePath = saveDir.appendingPathComponent(filename).path
 
-        // Chờ 150ms để NSMenu đóng mượt mà trước khi chụp toàn màn hình
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-            task.arguments = ["-x", filePath]
-            try? task.run()
-            task.waitUntilExit()
+        let execute = { [weak self] in
+            var saveSuccess = false
+            if let img = preCapturedImages?[0] {
+                saveSuccess = saveCGImageAsPNG(img, to: filePath)
+            }
+            if !saveSuccess {
+                let task = Process()
+                task.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                task.arguments = ["-x", filePath]
+                try? task.run()
+                task.waitUntilExit()
+                saveSuccess = (task.terminationStatus == 0)
+            }
 
-            if task.terminationStatus == 0 {
+            if saveSuccess {
                 self?.copyImageToClipboard(filePath: filePath)
                 DispatchQueue.main.async {
                     QuickAccessController.shared.show(imagePath: filePath)
@@ -3312,15 +3494,25 @@ final class TrayController: NSObject, NSMenuDelegate {
                 showNotification(title: "xChup Lỗi", text: "Không thể chụp màn hình. Vui lòng kiểm tra quyền Ghi màn hình.")
             }
         }
+
+        if delay > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: execute)
+        } else {
+            execute()
+        }
     }
 
-    @objc func actionOCR() {
+    @objc func actionFullscreen() {
+        startFullscreenCapture(delay: 0.15)
+    }
+
+    func startOCRCapture(delay: Double = 0.0, preCapturedImages: [Int: CGImage]? = nil) {
         if let del = NSApp.delegate as? AppDelegate, !del.checkScreenCapturePermission(prompt: true) {
             return
         }
         let tempPath = "/tmp/xchup_ocr_\(ProcessInfo.processInfo.processIdentifier).png"
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            OverlayController.shared.show(outputPath: tempPath) { path, rect in
+        let execute = {
+            OverlayController.shared.show(outputPath: tempPath, preCapturedImages: preCapturedImages) { path, rect in
                 let text = OCRController.shared.recognize(imagePath: path)
                 let pb = NSPasteboard.general
                 pb.clearContents()
@@ -3329,6 +3521,16 @@ final class TrayController: NSObject, NSMenuDelegate {
                 try? FileManager.default.removeItem(atPath: path)
             }
         }
+
+        if delay > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: execute)
+        } else {
+            execute()
+        }
+    }
+
+    @objc func actionOCR() {
+        startOCRCapture(delay: 0.15)
     }
 
     @objc func actionPin() {
@@ -3516,14 +3718,14 @@ final class TrayController: NSObject, NSMenuDelegate {
         NSApp.terminate(nil)
     }
 
-    private func handleHotKey(_ action: HotKeyManager.Action) {
+    private func handleHotKey(_ action: HotKeyManager.Action, images: [Int: CGImage]?) {
         switch action {
         case .area:
-            actionArea()
+            startAreaCapture(delay: 0.0, preCapturedImages: images)
         case .fullscreen:
-            actionFullscreen()
+            startFullscreenCapture(delay: 0.0, preCapturedImages: images)
         case .ocr:
-            actionOCR()
+            startOCRCapture(delay: 0.0, preCapturedImages: images)
         case .pin:
             actionPin()
         case .record:
