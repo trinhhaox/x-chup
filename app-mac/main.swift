@@ -977,21 +977,33 @@ final class PinView: NSView {
 // MARK: - Annotation & Markup Editor
 
 enum AnnotationTool {
+    case select
     case arrow
+    case curvedArrow
     case rectangle
+    case highlight
     case blur
     case step
     case pen
     case text
 }
 
+enum WatermarkPosition: Int {
+    case bottomRight = 0
+    case bottomLeft = 1
+    case centerDiagonal = 2
+}
+
 enum AnnotationItem {
     case arrow(start: CGPoint, end: CGPoint, color: NSColor, width: CGFloat)
+    case curvedArrow(start: CGPoint, end: CGPoint, color: NSColor, width: CGFloat)
     case rectangle(rect: CGRect, color: NSColor, width: CGFloat)
+    case highlight(rect: CGRect, color: NSColor)
     case blur(rect: CGRect)
     case step(center: CGPoint, number: Int, color: NSColor)
     case pen(points: [CGPoint], color: NSColor, width: CGFloat)
-    case text(origin: CGPoint, text: String, color: NSColor, fontSize: CGFloat)
+    case text(id: UUID, origin: CGPoint, text: String, color: NSColor, fontSize: CGFloat)
+    case watermark(text: String, position: WatermarkPosition, color: NSColor)
 }
 
 final class AnnotationCanvasView: NSView {
@@ -1001,15 +1013,22 @@ final class AnnotationCanvasView: NSView {
 
     var currentTool: AnnotationTool = .arrow
     var currentColor: NSColor = .systemRed
-    var currentLineWidth: CGFloat = 3.5
+    var currentLineWidth: CGFloat = 4.0
+    var currentFontSize: CGFloat = 18.0
 
     var annotations: [AnnotationItem] = []
     var redoStack: [AnnotationItem] = []
     private var nextStepNumber: Int = 1
 
+    var selectedTextId: UUID?
+    private var isDraggingText: Bool = false
+    private var lastDragPoint: CGPoint?
+
     private var dragStart: CGPoint?
     private var dragCurrent: CGPoint?
     private var currentPenPoints: [CGPoint] = []
+
+    override var acceptsFirstResponder: Bool { true }
 
     init(image: NSImage) {
         self.baseImage = image
@@ -1027,6 +1046,9 @@ final class AnnotationCanvasView: NSView {
         if case .step = last {
             nextStepNumber = max(1, nextStepNumber - 1)
         }
+        if case .text(let id, _, _, _, _) = last, id == selectedTextId {
+            selectedTextId = nil
+        }
         needsDisplay = true
     }
 
@@ -1039,18 +1061,165 @@ final class AnnotationCanvasView: NSView {
         needsDisplay = true
     }
 
+    func addWatermark(text: String, position: WatermarkPosition, color: NSColor) {
+        let item = AnnotationItem.watermark(text: text, position: position, color: color)
+        annotations.append(item)
+        redoStack.removeAll()
+        needsDisplay = true
+    }
+
+    func deleteSelectedText() {
+        guard let selId = selectedTextId else { return }
+        if let idx = annotations.firstIndex(where: {
+            if case .text(let id, _, _, _, _) = $0, id == selId { return true }
+            return false
+        }) {
+            let removed = annotations.remove(at: idx)
+            redoStack.append(removed)
+            selectedTextId = nil
+            needsDisplay = true
+        }
+    }
+
+    func updateSelectedTextColor(_ color: NSColor) {
+        guard let selId = selectedTextId else { return }
+        if let idx = annotations.firstIndex(where: {
+            if case .text(let id, _, _, _, _) = $0, id == selId { return true }
+            return false
+        }) {
+            if case .text(let id, let origin, let text, _, let fontSize) = annotations[idx] {
+                annotations[idx] = .text(id: id, origin: origin, text: text, color: color, fontSize: fontSize)
+                needsDisplay = true
+            }
+        }
+    }
+
+    func updateSelectedTextSize(_ fontSize: CGFloat) {
+        guard let selId = selectedTextId else { return }
+        if let idx = annotations.firstIndex(where: {
+            if case .text(let id, _, _, _, _) = $0, id == selId { return true }
+            return false
+        }) {
+            if case .text(let id, let origin, let text, let color, _) = annotations[idx] {
+                annotations[idx] = .text(id: id, origin: origin, text: text, color: color, fontSize: fontSize)
+                needsDisplay = true
+            }
+        }
+    }
+
+    func setToolFromShortcut(_ tool: AnnotationTool) {
+        currentTool = tool
+        selectedTextId = nil
+        needsDisplay = true
+        let segIndex: Int
+        switch tool {
+        case .select: segIndex = 0
+        case .arrow: segIndex = 1
+        case .curvedArrow: segIndex = 2
+        case .rectangle: segIndex = 3
+        case .highlight: segIndex = 4
+        case .blur: segIndex = 5
+        case .step: segIndex = 6
+        case .pen: segIndex = 7
+        case .text: segIndex = 8
+        }
+        AnnotationWindowController.shared.updateSelectedToolSegment(segIndex)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if flags.contains(.command) {
+            if flags.contains(.shift) && (event.charactersIgnoringModifiers?.lowercased() == "z") {
+                redo()
+                return
+            } else if event.charactersIgnoringModifiers?.lowercased() == "z" {
+                undo()
+                return
+            } else if event.charactersIgnoringModifiers?.lowercased() == "c" {
+                AnnotationWindowController.shared.actionCopy()
+                return
+            } else if event.charactersIgnoringModifiers?.lowercased() == "s" {
+                AnnotationWindowController.shared.actionSave()
+                return
+            }
+        }
+
+        if event.keyCode == 51 || event.keyCode == 117 { // Delete / Backspace
+            if selectedTextId != nil {
+                deleteSelectedText()
+                return
+            }
+        } else if event.keyCode == 53 { // Escape
+            if selectedTextId != nil {
+                selectedTextId = nil
+                needsDisplay = true
+                return
+            }
+        } else if flags.isEmpty, let char = event.charactersIgnoringModifiers?.lowercased() {
+            switch char {
+            case "v": setToolFromShortcut(.select); return
+            case "a": setToolFromShortcut(.arrow); return
+            case "c": setToolFromShortcut(.curvedArrow); return
+            case "r": setToolFromShortcut(.rectangle); return
+            case "h": setToolFromShortcut(.highlight); return
+            case "b": setToolFromShortcut(.blur); return
+            case "s": setToolFromShortcut(.step); return
+            case "p": setToolFromShortcut(.pen); return
+            case "t": setToolFromShortcut(.text); return
+            default: break
+            }
+        }
+        super.keyDown(with: event)
+    }
+
+    private func textBoundingBox(origin: CGPoint, text: String, fontSize: CGFloat) -> CGRect {
+        let font = NSFont.systemFont(ofSize: fontSize, weight: .bold)
+        let attrs: [NSAttributedString.Key: Any] = [.font: font]
+        let size = (text as NSString).size(withAttributes: attrs)
+        return CGRect(
+            x: origin.x - 4,
+            y: origin.y - 2,
+            width: size.width + 8,
+            height: size.height + 4
+        )
+    }
+
+    private func findTextIndex(at pt: CGPoint) -> Int? {
+        for idx in annotations.indices.reversed() {
+            if case .text(_, let origin, let text, _, let fontSize) = annotations[idx] {
+                let box = textBoundingBox(origin: origin, text: text, fontSize: fontSize)
+                if box.contains(pt) {
+                    return idx
+                }
+            }
+        }
+        return nil
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        for item in annotations {
+            if case .text(_, let origin, let text, _, let fontSize) = item {
+                let box = textBoundingBox(origin: origin, text: text, fontSize: fontSize)
+                addCursorRect(box, cursor: .openHand)
+            }
+        }
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         baseImage.draw(in: bounds)
 
         for item in annotations {
-            drawItem(item, in: ctx)
+            drawItem(item, in: ctx, isExporting: false)
         }
 
         if let start = dragStart, let current = dragCurrent {
             switch currentTool {
             case .arrow:
                 drawArrow(ctx: ctx, start: start, end: current, color: currentColor, width: currentLineWidth)
+            case .curvedArrow:
+                drawCurvedArrow(ctx: ctx, start: start, end: current, color: currentColor, width: currentLineWidth)
             case .rectangle:
                 let r = CGRect(
                     x: min(start.x, current.x),
@@ -1059,6 +1228,14 @@ final class AnnotationCanvasView: NSView {
                     height: abs(current.y - start.y)
                 )
                 drawRect(ctx: ctx, rect: r, color: currentColor, width: currentLineWidth)
+            case .highlight:
+                let r = CGRect(
+                    x: min(start.x, current.x),
+                    y: min(start.y, current.y),
+                    width: abs(current.x - start.x),
+                    height: abs(current.y - start.y)
+                )
+                drawHighlight(ctx: ctx, rect: r, color: currentColor)
             case .blur:
                 let r = CGRect(
                     x: min(start.x, current.x),
@@ -1080,21 +1257,60 @@ final class AnnotationCanvasView: NSView {
         }
     }
 
-    private func drawItem(_ item: AnnotationItem, in ctx: CGContext) {
+    private func drawItem(_ item: AnnotationItem, in ctx: CGContext, isExporting: Bool = false) {
         switch item {
         case .arrow(let start, let end, let color, let width):
             drawArrow(ctx: ctx, start: start, end: end, color: color, width: width)
+        case .curvedArrow(let start, let end, let color, let width):
+            drawCurvedArrow(ctx: ctx, start: start, end: end, color: color, width: width)
         case .rectangle(let rect, let color, let width):
             drawRect(ctx: ctx, rect: rect, color: color, width: width)
+        case .highlight(let rect, let color):
+            drawHighlight(ctx: ctx, rect: rect, color: color)
         case .blur(let rect):
             drawBlur(ctx: ctx, rect: rect)
         case .step(let center, let number, let color):
             drawStep(ctx: ctx, center: center, number: number, color: color)
         case .pen(let points, let color, let width):
             drawPen(ctx: ctx, points: points, color: color, width: width)
-        case .text(let origin, let text, let color, let fontSize):
+        case .text(let id, let origin, let text, let color, let fontSize):
             drawText(origin: origin, text: text, color: color, fontSize: fontSize)
+            if !isExporting && id == selectedTextId {
+                drawTextSelectionBox(ctx: ctx, origin: origin, text: text, fontSize: fontSize)
+            }
+        case .watermark(let text, let position, let color):
+            drawWatermark(ctx: ctx, text: text, position: position, color: color)
         }
+    }
+
+    private func drawTextSelectionBox(ctx: CGContext, origin: CGPoint, text: String, fontSize: CGFloat) {
+        let box = textBoundingBox(origin: origin, text: text, fontSize: fontSize)
+        ctx.saveGState()
+        ctx.setStrokeColor(NSColor.systemBlue.cgColor)
+        ctx.setLineWidth(1.5)
+        ctx.setLineDash(phase: 0, lengths: [4, 4])
+        let path = CGPath(roundedRect: box, cornerWidth: 3, cornerHeight: 3, transform: nil)
+        ctx.addPath(path)
+        ctx.strokePath()
+
+        // 4 chấm góc
+        let r: CGFloat = 3.5
+        ctx.setFillColor(NSColor.white.cgColor)
+        ctx.setStrokeColor(NSColor.systemBlue.cgColor)
+        ctx.setLineWidth(1.0)
+        ctx.setLineDash(phase: 0, lengths: [])
+        let corners = [
+            CGPoint(x: box.minX, y: box.minY),
+            CGPoint(x: box.maxX, y: box.minY),
+            CGPoint(x: box.minX, y: box.maxY),
+            CGPoint(x: box.maxX, y: box.maxY)
+        ]
+        for c in corners {
+            let cr = CGRect(x: c.x - r, y: c.y - r, width: r * 2, height: r * 2)
+            ctx.fillEllipse(in: cr)
+            ctx.strokeEllipse(in: cr)
+        }
+        ctx.restoreGState()
     }
 
     private func drawArrow(ctx: CGContext, start: CGPoint, end: CGPoint, color: NSColor, width: CGFloat) {
@@ -1134,6 +1350,59 @@ final class AnnotationCanvasView: NSView {
         ctx.restoreGState()
     }
 
+    private func drawCurvedArrow(ctx: CGContext, start: CGPoint, end: CGPoint, color: NSColor, width: CGFloat) {
+        let dx = end.x - start.x
+        let dy = end.y - start.y
+        let dist = hypot(dx, dy)
+        guard dist > 4 else { return }
+
+        ctx.saveGState()
+        ctx.setStrokeColor(color.cgColor)
+        ctx.setFillColor(color.cgColor)
+        ctx.setLineWidth(width)
+        ctx.setLineCap(.round)
+
+        let nx = -dy / dist
+        let ny = dx / dist
+        let offset = min(max(dist * 0.22, 18.0), 75.0)
+
+        let midX = (start.x + end.x) / 2.0 + nx * offset
+        let midY = (start.y + end.y) / 2.0 + ny * offset
+        let controlPoint = CGPoint(x: midX, y: midY)
+
+        let tangentX = end.x - controlPoint.x
+        let tangentY = end.y - controlPoint.y
+        let angle = atan2(tangentY, tangentX)
+
+        let arrowLen = max(width * 4.5, 18.0)
+        let arrowAngle: CGFloat = .pi / 6.5
+
+        let shaftEnd = CGPoint(
+            x: end.x - (arrowLen * 0.7) * cos(angle),
+            y: end.y - (arrowLen * 0.7) * sin(angle)
+        )
+
+        ctx.move(to: start)
+        ctx.addQuadCurve(to: shaftEnd, control: controlPoint)
+        ctx.strokePath()
+
+        let p1 = CGPoint(
+            x: end.x - arrowLen * cos(angle - arrowAngle),
+            y: end.y - arrowLen * sin(angle - arrowAngle)
+        )
+        let p2 = CGPoint(
+            x: end.x - arrowLen * cos(angle + arrowAngle),
+            y: end.y - arrowLen * sin(angle + arrowAngle)
+        )
+
+        ctx.move(to: end)
+        ctx.addLine(to: p1)
+        ctx.addLine(to: p2)
+        ctx.closePath()
+        ctx.fillPath()
+        ctx.restoreGState()
+    }
+
     private func drawRect(ctx: CGContext, rect: CGRect, color: NSColor, width: CGFloat) {
         ctx.saveGState()
         ctx.setStrokeColor(color.cgColor)
@@ -1141,6 +1410,100 @@ final class AnnotationCanvasView: NSView {
         let path = CGPath(roundedRect: rect, cornerWidth: 5, cornerHeight: 5, transform: nil)
         ctx.addPath(path)
         ctx.strokePath()
+        ctx.restoreGState()
+    }
+
+    private func drawHighlight(ctx: CGContext, rect: CGRect, color: NSColor) {
+        guard rect.width > 1 && rect.height > 1 else { return }
+        ctx.saveGState()
+        ctx.setBlendMode(.multiply)
+        ctx.setFillColor(color.withAlphaComponent(0.42).cgColor)
+        let path = CGPath(roundedRect: rect, cornerWidth: 3, cornerHeight: 3, transform: nil)
+        ctx.addPath(path)
+        ctx.fillPath()
+        ctx.restoreGState()
+    }
+
+    private func drawWatermark(ctx: CGContext, text: String, position: WatermarkPosition, color: NSColor) {
+        guard !text.isEmpty else { return }
+        ctx.saveGState()
+
+        switch position {
+        case .bottomRight:
+            let font = NSFont.systemFont(ofSize: 15, weight: .bold)
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .foregroundColor: NSColor.white
+            ]
+            let str = text as NSString
+            let textSize = str.size(withAttributes: attrs)
+            let padH: CGFloat = 12.0
+            let padV: CGFloat = 6.0
+            let badgeW = textSize.width + padH * 2
+            let badgeH = textSize.height + padV * 2
+
+            let badgeOrigin = CGPoint(
+                x: max(12, bounds.width - badgeW - 16),
+                y: 16
+            )
+            let badgeRect = CGRect(origin: badgeOrigin, size: CGSize(width: badgeW, height: badgeH))
+
+            let bgPath = CGPath(roundedRect: badgeRect, cornerWidth: 6, cornerHeight: 6, transform: nil)
+            ctx.setFillColor(NSColor.black.withAlphaComponent(0.68).cgColor)
+            ctx.addPath(bgPath)
+            ctx.fillPath()
+
+            ctx.setStrokeColor(color.withAlphaComponent(0.85).cgColor)
+            ctx.setLineWidth(1.5)
+            ctx.addPath(bgPath)
+            ctx.strokePath()
+
+            str.draw(at: CGPoint(x: badgeOrigin.x + padH, y: badgeOrigin.y + padV), withAttributes: attrs)
+
+        case .bottomLeft:
+            let font = NSFont.systemFont(ofSize: 15, weight: .bold)
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .foregroundColor: NSColor.white
+            ]
+            let str = text as NSString
+            let textSize = str.size(withAttributes: attrs)
+            let padH: CGFloat = 12.0
+            let padV: CGFloat = 6.0
+            let badgeW = textSize.width + padH * 2
+            let badgeH = textSize.height + padV * 2
+
+            let badgeOrigin = CGPoint(x: 16, y: 16)
+            let badgeRect = CGRect(origin: badgeOrigin, size: CGSize(width: badgeW, height: badgeH))
+
+            let bgPath = CGPath(roundedRect: badgeRect, cornerWidth: 6, cornerHeight: 6, transform: nil)
+            ctx.setFillColor(NSColor.black.withAlphaComponent(0.68).cgColor)
+            ctx.addPath(bgPath)
+            ctx.fillPath()
+
+            ctx.setStrokeColor(color.withAlphaComponent(0.85).cgColor)
+            ctx.setLineWidth(1.5)
+            ctx.addPath(bgPath)
+            ctx.strokePath()
+
+            str.draw(at: CGPoint(x: badgeOrigin.x + padH, y: badgeOrigin.y + padV), withAttributes: attrs)
+
+        case .centerDiagonal:
+            let baseSize = min(bounds.width, bounds.height)
+            let fontSize = max(18.0, min(baseSize * 0.08, 48.0))
+            let font = NSFont.systemFont(ofSize: fontSize, weight: .black)
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .foregroundColor: color.withAlphaComponent(0.30)
+            ]
+            let str = text as NSString
+            let textSize = str.size(withAttributes: attrs)
+
+            ctx.translateBy(x: bounds.midX, y: bounds.midY)
+            ctx.rotate(by: .pi / 6.0)
+            str.draw(at: CGPoint(x: -textSize.width / 2, y: -textSize.height / 2), withAttributes: attrs)
+        }
+
         ctx.restoreGState()
     }
 
@@ -1226,7 +1589,36 @@ final class AnnotationCanvasView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
         let pt = convert(event.locationInWindow, from: nil)
+
+        // Kiểm tra xem có click trúng text nào không
+        if let textIdx = findTextIndex(at: pt) {
+            if case .text(let id, _, _, _, _) = annotations[textIdx] {
+                selectedTextId = id
+                needsDisplay = true
+
+                // Nếu double-click -> mở dialog sửa text
+                if event.clickCount >= 2 {
+                    promptEditText(for: annotations[textIdx], at: textIdx)
+                    return
+                }
+
+                // Nếu click 1 lần -> bắt đầu kéo text
+                isDraggingText = true
+                lastDragPoint = pt
+                return
+            }
+        }
+
+        // Nếu click ra ngoài text
+        if currentTool == .select {
+            selectedTextId = nil
+            needsDisplay = true
+            return
+        }
+
+        selectedTextId = nil
         dragStart = pt
         dragCurrent = pt
 
@@ -1248,6 +1640,30 @@ final class AnnotationCanvasView: NSView {
 
     override func mouseDragged(with event: NSEvent) {
         let pt = convert(event.locationInWindow, from: nil)
+
+        // Di chuyển text đang chọn
+        if isDraggingText, let selId = selectedTextId, let lastPt = lastDragPoint {
+            let dx = pt.x - lastPt.x
+            let dy = pt.y - lastPt.y
+            if let idx = annotations.firstIndex(where: {
+                if case .text(let id, _, _, _, _) = $0, id == selId { return true }
+                return false
+            }) {
+                if case .text(let id, let origin, let text, let color, let fontSize) = annotations[idx] {
+                    annotations[idx] = .text(
+                        id: id,
+                        origin: CGPoint(x: origin.x + dx, y: origin.y + dy),
+                        text: text,
+                        color: color,
+                        fontSize: fontSize
+                    )
+                }
+            }
+            lastDragPoint = pt
+            needsDisplay = true
+            return
+        }
+
         dragCurrent = pt
         if currentTool == .pen {
             currentPenPoints.append(pt)
@@ -1256,6 +1672,13 @@ final class AnnotationCanvasView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if isDraggingText {
+            isDraggingText = false
+            lastDragPoint = nil
+            needsDisplay = true
+            return
+        }
+
         guard let start = dragStart, let current = dragCurrent else { return }
         let dx = abs(current.x - start.x)
         let dy = abs(current.y - start.y)
@@ -1266,6 +1689,10 @@ final class AnnotationCanvasView: NSView {
                 let item = AnnotationItem.arrow(start: start, end: current, color: currentColor, width: currentLineWidth)
                 annotations.append(item)
                 redoStack.removeAll()
+            case .curvedArrow:
+                let item = AnnotationItem.curvedArrow(start: start, end: current, color: currentColor, width: currentLineWidth)
+                annotations.append(item)
+                redoStack.removeAll()
             case .rectangle:
                 let r = CGRect(
                     x: min(start.x, current.x),
@@ -1274,6 +1701,16 @@ final class AnnotationCanvasView: NSView {
                     height: abs(current.y - start.y)
                 )
                 let item = AnnotationItem.rectangle(rect: r, color: currentColor, width: currentLineWidth)
+                annotations.append(item)
+                redoStack.removeAll()
+            case .highlight:
+                let r = CGRect(
+                    x: min(start.x, current.x),
+                    y: min(start.y, current.y),
+                    width: abs(current.x - start.x),
+                    height: abs(current.y - start.y)
+                )
+                let item = AnnotationItem.highlight(rect: r, color: currentColor)
                 annotations.append(item)
                 redoStack.removeAll()
             case .blur:
@@ -1306,9 +1743,10 @@ final class AnnotationCanvasView: NSView {
     private func promptTextInput(at pt: CGPoint) {
         let alert = NSAlert()
         alert.messageText = "Nhập văn bản chú thích:"
+        alert.informativeText = "Sau khi nhập, bạn có thể click vào chữ để di chuyển hoặc nhấp đúp để sửa."
         alert.alertStyle = .informational
-        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
-        input.placeholderString = "Nhập chữ..."
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 26))
+        input.placeholderString = "Nhập nội dung chữ..."
         alert.accessoryView = input
         alert.addButton(withTitle: "Thêm")
         alert.addButton(withTitle: "Hủy")
@@ -1316,14 +1754,36 @@ final class AnnotationCanvasView: NSView {
         if alert.runModal() == .alertFirstButtonReturn {
             let str = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             if !str.isEmpty {
-                let item = AnnotationItem.text(origin: pt, text: str, color: currentColor, fontSize: 16)
+                let newId = UUID()
+                let item = AnnotationItem.text(id: newId, origin: pt, text: str, color: currentColor, fontSize: currentFontSize)
                 annotations.append(item)
                 redoStack.removeAll()
+                selectedTextId = newId
                 needsDisplay = true
             }
         }
         dragStart = nil
         dragCurrent = nil
+    }
+
+    private func promptEditText(for item: AnnotationItem, at index: Int) {
+        guard case .text(let id, let origin, let currentText, let color, let fontSize) = item else { return }
+        let alert = NSAlert()
+        alert.messageText = "Chỉnh sửa văn bản:"
+        alert.alertStyle = .informational
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 26))
+        input.stringValue = currentText
+        alert.accessoryView = input
+        alert.addButton(withTitle: "Cập nhật")
+        alert.addButton(withTitle: "Hủy")
+
+        if alert.runModal() == .alertFirstButtonReturn {
+            let str = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !str.isEmpty {
+                annotations[index] = .text(id: id, origin: origin, text: str, color: color, fontSize: fontSize)
+                needsDisplay = true
+            }
+        }
     }
 
     func renderFlattenedImage() -> NSImage {
@@ -1333,7 +1793,7 @@ final class AnnotationCanvasView: NSView {
         if let ctx = NSGraphicsContext.current?.cgContext {
             baseImage.draw(in: bounds)
             for item in annotations {
-                drawItem(item, in: ctx)
+                drawItem(item, in: ctx, isExporting: true)
             }
         }
         image.unlockFocus()
@@ -1347,20 +1807,26 @@ final class AnnotationWindowController: NSWindowController {
     private var imagePath: String = ""
     private var toolSegment: NSSegmentedControl!
     private var colorSegment: NSSegmentedControl!
+    private var sizeSegment: NSSegmentedControl!
 
     init() {
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            contentRect: NSRect(x: 0, y: 0, width: 920, height: 620),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         win.title = "xChup • Chú thích ảnh (Annotation Editor)"
+        win.minSize = NSSize(width: 880, height: 520)
         win.isReleasedWhenClosed = false
         super.init(window: win)
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    func updateSelectedToolSegment(_ index: Int) {
+        toolSegment?.selectedSegment = index
+    }
 
     func show(imagePath: String) {
         self.imagePath = imagePath
@@ -1369,14 +1835,14 @@ final class AnnotationWindowController: NSWindowController {
               let win = window else { return }
 
         let screenFrame = screen.visibleFrame
-        let maxW = screenFrame.width * 0.85
-        let maxH = screenFrame.height * 0.85
+        let maxW = screenFrame.width * 0.90
+        let maxH = screenFrame.height * 0.90
 
         var winW = image.size.width + 40
-        var winH = image.size.height + 100
+        var winH = image.size.height + 130
 
-        winW = min(max(winW, 640), maxW)
-        winH = min(max(winH, 480), maxH)
+        winW = min(max(winW, 900), maxW)
+        winH = min(max(winH, 560), maxH)
 
         win.setContentSize(NSSize(width: winW, height: winH))
         win.center()
@@ -1391,16 +1857,30 @@ final class AnnotationWindowController: NSWindowController {
         toolbarView.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(toolbarView)
 
+        // Hàng 1: Công cụ vẽ & thao tác
         toolSegment = NSSegmentedControl(
-            labels: ["↗ Mũi tên", "⬜ Khung", "⬛ Làm mờ", "① Đánh số", "✏ Bút", "T Chữ"],
+            labels: ["👆 Chọn (V)", "↗ Mũi tên (A)", "⤴ Uốn cong (C)", "⬜ Khung (R)", "🖍 Dạ quang (H)", "⬛ Làm mờ (B)", "① Đánh số (S)", "✏ Bút (P)", "T Chữ (T)"],
             trackingMode: .selectOne,
             target: self,
             action: #selector(toolChanged(_:))
         )
-        toolSegment.selectedSegment = 0
+        toolSegment.selectedSegment = 1
         toolSegment.translatesAutoresizingMaskIntoConstraints = false
         toolbarView.addSubview(toolSegment)
 
+        let watermarkBtn = NSButton(title: "🏷 Bản quyền", target: self, action: #selector(actionPromptWatermark))
+        watermarkBtn.bezelStyle = .rounded
+        watermarkBtn.toolTip = "Đóng dấu logo, text hoặc bản quyền lên ảnh"
+        watermarkBtn.translatesAutoresizingMaskIntoConstraints = false
+        toolbarView.addSubview(watermarkBtn)
+
+        let deleteBtn = NSButton(title: "🗑 Xóa chữ", target: self, action: #selector(actionDeleteSelected))
+        deleteBtn.bezelStyle = .rounded
+        deleteBtn.toolTip = "Xóa đoạn chữ đang được chọn (phím Delete)"
+        deleteBtn.translatesAutoresizingMaskIntoConstraints = false
+        toolbarView.addSubview(deleteBtn)
+
+        // Hàng 2: Màu sắc, Nét vẽ/Cỡ chữ, Undo/Redo & Lưu/Copy
         colorSegment = NSSegmentedControl(
             labels: ["🔴", "🟡", "🟢", "🔵", "🟣", "⚪", "⚫"],
             trackingMode: .selectOne,
@@ -1411,13 +1891,24 @@ final class AnnotationWindowController: NSWindowController {
         colorSegment.translatesAutoresizingMaskIntoConstraints = false
         toolbarView.addSubview(colorSegment)
 
-        let undoBtn = NSButton(title: "↶", target: self, action: #selector(actionUndo))
+        sizeSegment = NSSegmentedControl(
+            labels: ["⎯ 2pt", "━ 4pt", "⬛ 7pt"],
+            trackingMode: .selectOne,
+            target: self,
+            action: #selector(sizeChanged(_:))
+        )
+        sizeSegment.selectedSegment = 1
+        sizeSegment.toolTip = "Độ dày nét vẽ & Cỡ chữ (Nhỏ / Vừa / Lớn)"
+        sizeSegment.translatesAutoresizingMaskIntoConstraints = false
+        toolbarView.addSubview(sizeSegment)
+
+        let undoBtn = NSButton(title: "↶ Hoàn tác", target: self, action: #selector(actionUndo))
         undoBtn.bezelStyle = .rounded
-        undoBtn.toolTip = "Hoàn tác"
+        undoBtn.toolTip = "Hoàn tác (⌘Z)"
         undoBtn.translatesAutoresizingMaskIntoConstraints = false
         toolbarView.addSubview(undoBtn)
 
-        let redoBtn = NSButton(title: "↷", target: self, action: #selector(actionRedo))
+        let redoBtn = NSButton(title: "↷ Làm lại", target: self, action: #selector(actionRedo))
         redoBtn.bezelStyle = .rounded
         redoBtn.toolTip = "Làm lại (⌘⇧Z)"
         redoBtn.translatesAutoresizingMaskIntoConstraints = false
@@ -1425,12 +1916,14 @@ final class AnnotationWindowController: NSWindowController {
 
         let copyBtn = NSButton(title: "📋 Sao chép", target: self, action: #selector(actionCopy))
         copyBtn.bezelStyle = .rounded
+        copyBtn.toolTip = "Sao chép ảnh đã chú thích vào Clipboard (⌘C)"
         copyBtn.translatesAutoresizingMaskIntoConstraints = false
         toolbarView.addSubview(copyBtn)
 
-        let saveBtn = NSButton(title: "💾 Lưu", target: self, action: #selector(actionSave))
+        let saveBtn = NSButton(title: "💾 Lưu ảnh", target: self, action: #selector(actionSave))
         saveBtn.bezelStyle = .rounded
         saveBtn.keyEquivalent = "\r"
+        saveBtn.toolTip = "Lưu ảnh đè lên file gốc (⌘S hoặc Return)"
         saveBtn.translatesAutoresizingMaskIntoConstraints = false
         toolbarView.addSubview(saveBtn)
 
@@ -1450,26 +1943,40 @@ final class AnnotationWindowController: NSWindowController {
             toolbarView.topAnchor.constraint(equalTo: root.topAnchor),
             toolbarView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             toolbarView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            toolbarView.heightAnchor.constraint(equalToConstant: 46),
+            toolbarView.heightAnchor.constraint(equalToConstant: 78),
 
-            toolSegment.leadingAnchor.constraint(equalTo: toolbarView.leadingAnchor, constant: 14),
-            toolSegment.centerYAnchor.constraint(equalTo: toolbarView.centerYAnchor),
+            // Hàng 1
+            toolSegment.leadingAnchor.constraint(equalTo: toolbarView.leadingAnchor, constant: 12),
+            toolSegment.topAnchor.constraint(equalTo: toolbarView.topAnchor, constant: 8),
+            toolSegment.heightAnchor.constraint(equalToConstant: 28),
 
-            colorSegment.leadingAnchor.constraint(equalTo: toolSegment.trailingAnchor, constant: 12),
-            colorSegment.centerYAnchor.constraint(equalTo: toolbarView.centerYAnchor),
+            watermarkBtn.leadingAnchor.constraint(equalTo: toolSegment.trailingAnchor, constant: 8),
+            watermarkBtn.centerYAnchor.constraint(equalTo: toolSegment.centerYAnchor),
 
-            undoBtn.leadingAnchor.constraint(equalTo: colorSegment.trailingAnchor, constant: 12),
-            undoBtn.centerYAnchor.constraint(equalTo: toolbarView.centerYAnchor),
+            deleteBtn.leadingAnchor.constraint(equalTo: watermarkBtn.trailingAnchor, constant: 8),
+            deleteBtn.centerYAnchor.constraint(equalTo: toolSegment.centerYAnchor),
+
+            // Hàng 2
+            colorSegment.leadingAnchor.constraint(equalTo: toolbarView.leadingAnchor, constant: 12),
+            colorSegment.topAnchor.constraint(equalTo: toolSegment.bottomAnchor, constant: 8),
+            colorSegment.heightAnchor.constraint(equalToConstant: 28),
+
+            sizeSegment.leadingAnchor.constraint(equalTo: colorSegment.trailingAnchor, constant: 10),
+            sizeSegment.centerYAnchor.constraint(equalTo: colorSegment.centerYAnchor),
+
+            undoBtn.leadingAnchor.constraint(equalTo: sizeSegment.trailingAnchor, constant: 10),
+            undoBtn.centerYAnchor.constraint(equalTo: colorSegment.centerYAnchor),
 
             redoBtn.leadingAnchor.constraint(equalTo: undoBtn.trailingAnchor, constant: 4),
-            redoBtn.centerYAnchor.constraint(equalTo: toolbarView.centerYAnchor),
+            redoBtn.centerYAnchor.constraint(equalTo: colorSegment.centerYAnchor),
 
-            saveBtn.trailingAnchor.constraint(equalTo: toolbarView.trailingAnchor, constant: -14),
-            saveBtn.centerYAnchor.constraint(equalTo: toolbarView.centerYAnchor),
+            saveBtn.trailingAnchor.constraint(equalTo: toolbarView.trailingAnchor, constant: -12),
+            saveBtn.centerYAnchor.constraint(equalTo: colorSegment.centerYAnchor),
 
             copyBtn.trailingAnchor.constraint(equalTo: saveBtn.leadingAnchor, constant: -8),
-            copyBtn.centerYAnchor.constraint(equalTo: toolbarView.centerYAnchor),
+            copyBtn.centerYAnchor.constraint(equalTo: colorSegment.centerYAnchor),
 
+            // Scrollview
             scroll.topAnchor.constraint(equalTo: toolbarView.bottomAnchor),
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
@@ -1482,38 +1989,111 @@ final class AnnotationWindowController: NSWindowController {
 
     @objc private func toolChanged(_ sender: NSSegmentedControl) {
         switch sender.selectedSegment {
-        case 0: canvasView?.currentTool = .arrow
-        case 1: canvasView?.currentTool = .rectangle
-        case 2: canvasView?.currentTool = .blur
-        case 3: canvasView?.currentTool = .step
-        case 4: canvasView?.currentTool = .pen
-        case 5: canvasView?.currentTool = .text
+        case 0: canvasView?.currentTool = .select
+        case 1: canvasView?.currentTool = .arrow
+        case 2: canvasView?.currentTool = .curvedArrow
+        case 3: canvasView?.currentTool = .rectangle
+        case 4: canvasView?.currentTool = .highlight
+        case 5: canvasView?.currentTool = .blur
+        case 6: canvasView?.currentTool = .step
+        case 7: canvasView?.currentTool = .pen
+        case 8: canvasView?.currentTool = .text
         default: break
         }
     }
 
     @objc private func colorChanged(_ sender: NSSegmentedControl) {
+        let newColor: NSColor
         switch sender.selectedSegment {
-        case 0: canvasView?.currentColor = .systemRed
-        case 1: canvasView?.currentColor = .systemYellow
-        case 2: canvasView?.currentColor = .systemGreen
-        case 3: canvasView?.currentColor = .systemBlue
-        case 4: canvasView?.currentColor = .systemPurple
-        case 5: canvasView?.currentColor = .white
-        case 6: canvasView?.currentColor = .black
-        default: break
+        case 0: newColor = .systemRed
+        case 1: newColor = .systemYellow
+        case 2: newColor = .systemGreen
+        case 3: newColor = .systemBlue
+        case 4: newColor = .systemPurple
+        case 5: newColor = .white
+        case 6: newColor = .black
+        default: newColor = .systemRed
+        }
+        canvasView?.currentColor = newColor
+        canvasView?.updateSelectedTextColor(newColor)
+    }
+
+    @objc private func sizeChanged(_ sender: NSSegmentedControl) {
+        let width: CGFloat
+        let fontSize: CGFloat
+        switch sender.selectedSegment {
+        case 0:
+            width = 2.0
+            fontSize = 14.0
+        case 1:
+            width = 4.0
+            fontSize = 18.0
+        case 2:
+            width = 7.0
+            fontSize = 26.0
+        default:
+            width = 4.0
+            fontSize = 18.0
+        }
+        canvasView?.currentLineWidth = width
+        canvasView?.currentFontSize = fontSize
+        canvasView?.updateSelectedTextSize(fontSize)
+    }
+
+    @objc private func actionDeleteSelected() {
+        canvasView?.deleteSelectedText()
+    }
+
+    @objc private func actionPromptWatermark() {
+        guard let canvas = canvasView else { return }
+        let alert = NSAlert()
+        alert.messageText = "Đóng dấu bản quyền (Watermark)"
+        alert.informativeText = "Nhập nội dung bản quyền hoặc tên thương hiệu để đóng dấu lên ảnh:"
+        alert.alertStyle = .informational
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 80))
+
+        let lastText = UserDefaults.standard.string(forKey: "xchup_last_watermark_text") ?? "© xChup Shot"
+        let input = NSTextField(frame: NSRect(x: 0, y: 46, width: 320, height: 26))
+        input.stringValue = lastText
+        input.placeholderString = "Ví dụ: © 2026 YourName hoặc Tên website..."
+        container.addSubview(input)
+
+        let posLabel = NSTextField(labelWithString: "Vị trí đóng dấu:")
+        posLabel.frame = NSRect(x: 0, y: 14, width: 100, height: 20)
+        container.addSubview(posLabel)
+
+        let posPopup = NSPopUpButton(frame: NSRect(x: 105, y: 12, width: 215, height: 24), pullsDown: false)
+        posPopup.addItems(withTitles: ["Góc dưới bên phải", "Góc dưới bên trái", "Chạy chéo trung tâm"])
+        let lastPos = UserDefaults.standard.integer(forKey: "xchup_last_watermark_pos")
+        posPopup.selectItem(at: min(max(lastPos, 0), 2))
+        container.addSubview(posPopup)
+
+        alert.accessoryView = container
+        alert.addButton(withTitle: "Đóng dấu")
+        alert.addButton(withTitle: "Hủy")
+
+        if alert.runModal() == .alertFirstButtonReturn {
+            let str = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !str.isEmpty {
+                let posIndex = posPopup.indexOfSelectedItem
+                let pos = WatermarkPosition(rawValue: posIndex) ?? .bottomRight
+                UserDefaults.standard.set(str, forKey: "xchup_last_watermark_text")
+                UserDefaults.standard.set(posIndex, forKey: "xchup_last_watermark_pos")
+                canvas.addWatermark(text: str, position: pos, color: canvas.currentColor)
+            }
         }
     }
 
-    @objc private func actionUndo() {
+    @objc func actionUndo() {
         canvasView?.undo()
     }
 
-    @objc private func actionRedo() {
+    @objc func actionRedo() {
         canvasView?.redo()
     }
 
-    @objc private func actionCopy() {
+    @objc func actionCopy() {
         guard let canvas = canvasView else { return }
         let finalImg = canvas.renderFlattenedImage()
         let pb = NSPasteboard.general
@@ -1523,7 +2103,7 @@ final class AnnotationWindowController: NSWindowController {
         window?.orderOut(nil)
     }
 
-    @objc private func actionSave() {
+    @objc func actionSave() {
         guard let canvas = canvasView else { return }
         let finalImg = canvas.renderFlattenedImage()
         if let tiff = finalImg.tiffRepresentation,
@@ -3724,8 +4304,8 @@ final class TrayController: NSObject, NSMenuDelegate {
 
         Bộ công cụ chú thích ảnh tức thì (Instant Annotation):
         • Quick Card sau khi chụp: Bấm '✏️ Sửa' hoặc nhấp đúp thumbnail để mở Editor.
-        • Công cụ vẽ: Mũi tên (Arrow), Khung (Box), Làm mờ bảo mật (Blur Pixelate), Đánh số thứ tự tự tăng ① ② ③ (Step Counter), Bút vẽ tự do (Pen) & Chữ (Text).
-        • Trong trình chú thích: bấm Return để lưu.
+        • Công cụ vẽ: Mũi tên thẳng & Uốn cong mềm mại (Curved Arrow), Bút dạ quang làm nổi bật chữ (Highlighter), Đóng dấu bản quyền/thương hiệu (Watermark), Khung chữ nhật (Box), Làm mờ bảo mật (Blur Pixelate), Đánh số thứ tự tự tăng ① ② ③ (Step Counter), Bút vẽ tự do (Pen) & Chữ (Text).
+        • Trong trình chú thích: bấm Return để lưu nhanh.
 
         Tính năng nâng cao:
         • Quick Access Card: Kéo thả file trực tiếp vào Telegram, Slack, VSCode.
